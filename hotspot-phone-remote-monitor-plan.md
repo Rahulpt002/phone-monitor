@@ -1,6 +1,8 @@
 # Outdoor Hotspot Phone: Remote Monitoring and Control
 
-Project plan, version 1.0 (19 November 2026)
+Project plan, version 1.1 (19 November 2026)
+
+Device-agnostic: no phone model is fixed yet. A used Samsung Galaxy S with a broken screen is the likely first device (see 4.6 and Appendix A).
 
 ---
 
@@ -37,6 +39,7 @@ Why this and not the alternatives:
 | Topic | Decision | Reason |
 |-------|----------|--------|
 | Root | Yes (Magisk or KernelSU) | A normal app cannot switch tethering, airplane mode, charging or reboot from the background. With root each is one shell command. |
+| Phone model | Not fixed. The Agent works on any rooted Android phone | Everything that differs per model sits in one small device profile (6.1). Changing phones means writing a new profile, not changing the app. |
 | Remote reachability | The Agent opens an outbound secure WebSocket to the Server and keeps it open | Mobile carriers put SIMs behind carrier-grade NAT, so nothing on the internet can connect into the phone. Outbound connections always work. |
 | Recovery logic | Runs on the phone, not on the server | When the internet is down, remote commands cannot arrive. The phone has to fix itself. |
 | Signal Finder | Inside the Agent, mirrored live to the Dashboard | You carry the hotspot phone around. The mirror lets you read values on a second phone while the first is held up on a pole or roof edge. |
@@ -82,7 +85,7 @@ Why this and not the alternatives:
 
 ## 4. Hardware and installation (settle this before writing code)
 
-These five physical points decide whether the project works. Software cannot fix any of them afterwards.
+These six points decide whether the project works. Software cannot fix any of them afterwards.
 
 ### 4.1 Power budget
 
@@ -108,8 +111,8 @@ A lithium battery held at 100% in a hot box for months swells and can catch fire
 
 After a long power cut the battery empties. When power returns, most phones show a charging animation and stay off. The phone must boot by itself when it receives power.
 
-- On many phones: `fastboot oem off-mode-charge 0`.
-- On others: a root change to the offline-charging service so it reboots into Android. This is device-specific.
+- On phones with fastboot (Pixel, Motorola, OnePlus and others): `fastboot oem off-mode-charge 0`.
+- On phones without fastboot, including Samsung: a root change that makes the charging-only mode reboot into Android. Ready-made Magisk modules exist for this (for example magisk-autoboot), but support varies by model.
 - Prove it in Phase 0. If the phone cannot do it, use a different phone. This is a must-have.
 
 ### 4.4 Cable length
@@ -125,6 +128,30 @@ After a long power cut the battery empties. When power returns, most phones show
 - Cable enters from below through a gland. Silica gel packs inside. A small roof or shade above.
 - Mount the phone at the same height and in the same orientation as the winning survey spot (section 7).
 - Fix it firmly. The Agent raises an alert if tilt or location changes.
+
+### 4.6 Choosing the phone
+
+The plan does not depend on a model. Any Android phone works if it passes this list. A phone with a broken screen or back glass is a good cheap choice, because the screen is never used after setup.
+
+Must work:
+
+- Mainboard, SIM slot and mobile data. Test with your own SIM.
+- The USB port carries data, not only charging. Connect it to a PC and check that the phone is detected.
+- The bootloader can be unlocked. Without this there is no root.
+- Clean IMEI (not blacklisted), no Google account lock (FRP), no carrier lock, no finance lock.
+- No water damage. Corrosion gets worse outdoors.
+- Volume and power buttons. The unlock steps need them.
+- Supports the bands your carrier uses, including 5G if you want it.
+
+Strongly preferred:
+
+- The display still shows a picture, even if cracked. Unlocking and rooting use boot screens that are very hard to do blind.
+- Working speaker. The Signal Finder beeps and talks.
+- If only touch is dead, a USB mouse through an OTG adapter works.
+
+Always:
+
+- Fit a new battery before deployment. A used battery of unknown age in a hot box is the main fire risk (4.2). Reject any phone whose back is lifting: that is a swollen battery.
 
 ---
 
@@ -161,6 +188,10 @@ After a long power cut the battery empties. When power returns, most phones show
 | Local UI | Status, Finder, Pairing (QR code), Settings. |
 
 **Capability map:** at first start the Agent tests which commands this phone supports and reports the list. The Dashboard shows only the controls that work. This handles the differences between Android versions and brands.
+
+**Device profile:** everything that differs per phone model sits in one small file: the charge-control path, the tethering function name, the automatic power-on method, and any command that needs a different form. Supporting a new phone means adding a profile.
+
+**Headless operation:** the Agent must be fully usable with a dead screen. Pairing works by ADB command as well as by QR code, every setting is reachable from the Dashboard, and the Signal Finder can be driven with the volume buttons and spoken feedback.
 
 ### 6.2 What it monitors
 
@@ -264,6 +295,7 @@ Readings are refreshed about once per second and smoothed over 5 seconds. The we
 | Walk | Large live score, colour bar, and sound: the tone rises as the score rises (like a metal detector), with the score spoken every few seconds. You can hold the phone up and listen without seeing the screen. |
 | Spot test | Hold still for 30 seconds. Saves average, minimum, maximum and stability of each metric, serving cell, GPS position, compass direction, phone orientation, a name and an optional photo. |
 | Speed test | Download, upload, ping and jitter at a saved spot. Three runs. Each run uses roughly 10 to 30 MB of data. |
+| Headless | For a phone with a broken screen: volume up starts a spot test, volume down runs a speed test, and results are spoken aloud. |
 | Mirror | Streams the live score to the Dashboard on the monitoring phone once per second. |
 | Ranking | Lists saved spots, sorted by measured speed first and score second. Exports CSV. |
 | Baseline | After installation, stores the winning spot's numbers. The Dashboard later compares live values against them. |
@@ -448,6 +480,7 @@ Use `adb shell` and `su` only. Record every result in `docs/`.
 
 | Test | Pass condition | Must-have? |
 |------|----------------|------------|
+| Bootloader | The unlock option exists and the bootloader unlocks | Yes |
 | Root | Works and survives a reboot | Yes |
 | Automatic power-on | Phone boots by itself from fully off when power is connected | Yes |
 | Tethering after reboot | USB tethering comes up with no touch | Yes |
@@ -517,6 +550,7 @@ A quick first survey with an existing cell-info app also shows whether any spot 
 
 | Risk | Effect | Mitigation |
 |------|--------|------------|
+| Phone cannot be unlocked or rooted | Most control features are lost | Buying checklist (4.6); Samsung rules in Appendix A; reduced fallback in A.3 |
 | USB port too weak | Phone drains and dies | Phase 0 power test; net-current display and alert; stronger port or powered hub |
 | Battery heat and swelling | Fire hazard, hardware failure | Charge limit, temperature cut-off, shade, regular inspection |
 | Phone does not boot after a long power cut | System stays down until someone visits | Automatic power-on is a Phase 0 must-have |
@@ -533,8 +567,42 @@ A quick first survey with an existing cell-info app also shows whether any spot 
 
 ## 14. Information needed to finalize
 
-1. Phone model and Android version. This decides the root method, the automatic power-on method and the charge-control file.
+1. The exact phone model and software version, once bought. This fills in the device profile: root method, automatic power-on method and charge-control path.
 2. What the indoor end of the USB cable plugs into (router model or PC), and whether the port is USB 2.0 or 3.0.
 3. Cable distance from the outdoor spot to that device.
 4. Carrier, 4G or 5G, one SIM or two.
 5. Where the Server will run (a rented VPS, a free cloud tier, or the Lite variant with no server).
+
+---
+
+## Appendix A: Samsung Galaxy S series notes
+
+A Galaxy S can do this job, but the model and its software version matter more than on most brands.
+
+### A.1 What to buy
+
+| Check | Why |
+|-------|-----|
+| Model number does not end in U, U1 or W | United States and Canada models cannot be bootloader-unlocked. |
+| Software is One UI 7 (Android 15) or older | One UI 8 (Android 16) removed bootloader unlocking on Galaxy phones worldwide. A phone already on One UI 8 cannot be rooted. |
+| Safest families: Galaxy S10, S20, S21 (not the S21 FE) | Their updates ended at One UI 7 or earlier, so they can never be on One UI 8. |
+| Risky: S21 FE, S22 and newer | These received One UI 8. One is usable only if it was never updated, which is hard to confirm on a phone with a broken screen. |
+| "OEM unlocking" switch is visible in Developer options | Direct proof that this phone can be unlocked. Check before paying if the screen works. |
+| No finance lock (Knox Guard) | A financed phone can be locked remotely by the lender. |
+
+Ask the seller for the full model number (for example SM-G991B) and the One UI version before buying.
+
+### A.2 What is different on Samsung
+
+- **No fastboot.** Unlocking and flashing use Download mode and the Odin tool on a PC. Root is a Magisk-patched firmware flashed with Odin.
+- **Unlocking wipes the phone and permanently trips Knox.** Samsung Pay and Secure Folder stop working. That does not matter here.
+- **Automatic power-on is the biggest Samsung risk.** The fastboot command in 4.3 does not exist. Use a root method that makes the charging-only mode reboot into Android (a boot-image patch such as the magisk-autoboot module, or on older models replacing the charging-animation program). Samsung's own "power on when plugged in" is an enterprise Knox policy, not a user setting. Make this the first Phase 0 test.
+- **Charge limit is built in.** "Protect battery" caps at 85% on older One UI; One UI 7 lets you pick 80 to 95%. Use it as the base layer. With root, go lower (50 to 60%) through Samsung's battery control files, found in Phase 0.
+- **Dead screen workaround.** S-series phones output video over USB-C, so a hub with HDMI and a mouse can stand in for the screen once Android has started. Download mode does not output video, so the unlock and flash steps would be done blind. This is why a visible display is strongly preferred (4.6).
+- **Background limits.** One UI stops background apps aggressively. Set the Agent to unrestricted battery use and add it to "Never sleeping apps".
+- **Updates.** Keep automatic updates off. On the risky families, an update to One UI 8 was reported to re-lock already unlocked phones.
+- **Service menu.** Dialling `*#0011#` shows band and signal details, useful for cross-checking the Signal Finder.
+
+### A.3 If the phone turns out not to be rootable
+
+A reduced version is still possible. If the indoor device is a PC or a router that can run `adb`, it can send shell-level commands down the same USB cable: mobile data, airplane mode, tethering, hotspot and reboot work without root. What is lost: charging control below the built-in limit, automatic power-on, the root shell and the deeper system readings. Treat this as a fallback, not the target.
