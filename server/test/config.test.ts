@@ -1,0 +1,65 @@
+import { describe, expect, it } from 'vitest';
+import { ConfigError, loadConfig } from '../src/config.js';
+
+describe('loadConfig', () => {
+  it('has local-development defaults', () => {
+    const c = loadConfig({});
+    expect(c).toMatchObject({
+      port: 8080,
+      host: '0.0.0.0',
+      publicUrl: null,
+      sessionTtlDays: 30,
+      corsOrigins: [],
+      logLevel: 'info',
+      trustProxy: true,
+      adminUsername: null,
+      adminPassword: null,
+    });
+    expect(c.databaseUrl).toMatch(/^file:.*server[/\\]data[/\\]hsm\.db$/);
+    expect(c.webDist).toMatch(/web[/\\]dist$/);
+  });
+
+  it('parses values and treats blanks as unset', () => {
+    const c = loadConfig({
+      PORT: '10000',
+      PUBLIC_URL: 'https://hsm.onrender.com/',
+      DATABASE_URL: 'libsql://hsm-me.turso.io',
+      DATABASE_AUTH_TOKEN: 'tok',
+      CORS_ORIGINS: 'https://hsm.vercel.app, https://other.example/',
+      TRUST_PROXY: 'false',
+      SESSION_TTL_DAYS: '7',
+      TELEGRAM_BOT_TOKEN: '',
+      LOG_LEVEL: 'warn',
+    });
+    expect(c).toMatchObject({
+      port: 10000,
+      publicUrl: 'https://hsm.onrender.com',
+      databaseUrl: 'libsql://hsm-me.turso.io',
+      databaseAuthToken: 'tok',
+      corsOrigins: ['https://hsm.vercel.app', 'https://other.example'],
+      trustProxy: false,
+      sessionTtlDays: 7,
+      telegramBotToken: null,
+      logLevel: 'warn',
+    });
+    expect(loadConfig({ TRUST_PROXY: 'loopback,uniquelocal' }).trustProxy).toBe('loopback,uniquelocal');
+  });
+
+  it('falls back to RENDER_EXTERNAL_URL for the public URL', () => {
+    expect(loadConfig({ RENDER_EXTERNAL_URL: 'https://hsm.onrender.com' }).publicUrl).toBe('https://hsm.onrender.com');
+    expect(loadConfig({ RENDER_EXTERNAL_URL: 'https://a.onrender.com', PUBLIC_URL: 'https://hsm.example.com' }).publicUrl).toBe(
+      'https://hsm.example.com',
+    );
+  });
+
+  it('reports every invalid variable', () => {
+    expect(() => loadConfig({ PORT: 'eighty', PUBLIC_URL: 'hsm.example.com', VAPID_SUBJECT: 'me@example.com' })).toThrow(ConfigError);
+    try {
+      loadConfig({ PORT: 'eighty', PUBLIC_URL: 'hsm.example.com' });
+    } catch (e) {
+      expect((e as Error).message).toContain('PORT');
+      expect((e as Error).message).toContain('PUBLIC_URL');
+    }
+    expect(() => loadConfig({ CORS_ORIGINS: 'not a url' })).toThrow(ConfigError);
+  });
+});

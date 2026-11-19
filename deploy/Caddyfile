@@ -1,0 +1,19 @@
+# HTTPS in front of the Server (certificates from Let's Encrypt, renewed automatically).
+# DOMAIN comes from deploy/.env through docker-compose.yml.
+{$DOMAIN} {
+	encode zstd gzip
+
+	# WebSockets (/ws/agent, /ws/dashboard) are proxied transparently. Caddy adds
+	# X-Forwarded-For / X-Forwarded-Proto, which the Server trusts from the Docker network only.
+	reverse_proxy server:8080 {
+		# Let long-lived WebSockets outlive a config reload.
+		stream_close_delay 5m
+	}
+
+	header -Server
+
+	log {
+		output stdout
+		format console
+	}
+}

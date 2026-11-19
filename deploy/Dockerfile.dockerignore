@@ -1,0 +1,20 @@
+# BuildKit uses this file for `docker build -f deploy/Dockerfile .` (context = repository root).
+**/node_modules
+**/dist
+**/dev-dist
+**/coverage
+**/*.log
+**/.DS_Store
+.git
+.github
+.vscode
+.idea
+agent
+docs
+server/data
+**/*.db
+**/*.db-*
+**/.env
+**/.env.*
+!**/.env.example
+deploy

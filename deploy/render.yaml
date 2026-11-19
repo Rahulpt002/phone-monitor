@@ -1,0 +1,57 @@
+# Render Blueprint: one free web service that runs the Server and serves the built Dashboard.
+#
+# Create it in the Render dashboard: New > Blueprint > pick this repository and set
+# "Blueprint file path" to deploy/render.yaml (or copy this file to the repository root).
+# Step-by-step guide: docs/deploy.md.
+#
+# Render's free tier has no persistent disk, so the database is Turso (libSQL):
+# DATABASE_URL=libsql://<db>-<org>.turso.io plus DATABASE_AUTH_TOKEN.
+services:
+  - type: web
+    name: hotspot-monitor
+    runtime: node
+    plan: free
+    # Pick the region closest to the phone and to your Turso database; it cannot be changed later.
+    region: singapore
+    branch: main
+    autoDeploy: true
+    # Do not set NODE_ENV=production here: npm ci would skip the dev dependencies the build needs.
+    buildCommand: npm ci && npm run build
+    startCommand: npm start
+    healthCheckPath: /healthz
+    envVars:
+      - key: NODE_VERSION
+        value: "20"
+      - key: HOST
+        value: 0.0.0.0
+      - key: LOG_LEVEL
+        value: info
+      - key: SESSION_TTL_DAYS
+        value: "30"
+      - key: TRUST_PROXY
+        value: "true"
+      # Required secrets (Render asks for them when the Blueprint is created).
+      - key: DATABASE_URL
+        sync: false
+      - key: DATABASE_AUTH_TOKEN
+        sync: false
+      - key: ADMIN_USERNAME
+        sync: false
+      - key: ADMIN_PASSWORD
+        sync: false
+      # Optional. Leave empty to skip. PUBLIC_URL defaults to Render's RENDER_EXTERNAL_URL;
+      # set it only for a custom domain. Empty VAPID keys are generated once and kept in the DB.
+      - key: PUBLIC_URL
+        sync: false
+      - key: TELEGRAM_BOT_TOKEN
+        sync: false
+      - key: TELEGRAM_CHAT_ID
+        sync: false
+      - key: VAPID_PUBLIC_KEY
+        sync: false
+      - key: VAPID_PRIVATE_KEY
+        sync: false
+      - key: VAPID_SUBJECT
+        sync: false
+      - key: CORS_ORIGINS
+        sync: false

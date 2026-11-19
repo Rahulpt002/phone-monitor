@@ -1,0 +1,50 @@
+# VPS option (plan 11): Caddy terminates HTTPS and proxies to the Server; SQLite on a volume.
+#
+#   cp deploy/.env.example deploy/.env      # then edit: DOMAIN, ADMIN_*, TELEGRAM_*, ...
+#   docker compose -f deploy/docker-compose.yml up -d --build
+#
+# Point the domain's DNS A/AAAA record at the VPS and open ports 80 and 443 first, so Caddy can
+# obtain the Let's Encrypt certificate. Guide: docs/deploy.md section "VPS with Docker Compose".
+name: hotspot-monitor
+
+services:
+  server:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      DATABASE_URL: file:/data/hsm.db
+      PUBLIC_URL: https://${DOMAIN:?set DOMAIN in deploy/.env}
+      PORT: "8080"
+      HOST: 0.0.0.0
+      WEB_DIST: /app/web/dist
+      # Only the Caddy container (private Docker network) is a trusted proxy.
+      TRUST_PROXY: loopback,linklocal,uniquelocal
+    volumes:
+      - hsm-data:/data
+    expose:
+      - "8080"
+    stop_grace_period: 15s
+
+  caddy:
+    image: caddy:2.8
+    restart: unless-stopped
+    depends_on:
+      - server
+    ports:
+      - "80:80"
+      - "443:443"
+      - "443:443/udp"
+    environment:
+      DOMAIN: ${DOMAIN:?set DOMAIN in deploy/.env}
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data
+      - caddy-config:/config
+
+volumes:
+  hsm-data:
+  caddy-data:
+  caddy-config:
