@@ -411,6 +411,33 @@ class SyncEngineTest {
     }
 
     @Test
+    fun aSlowUpgradeFromASleepingServerIsNotCutByTheHelloTimeout() = runTest {
+        val h = started()
+        // A free-tier Server boots for 60 s before it answers the upgrade (OkHttp read timeout 75 s).
+        advanceTimeBy(60_000)
+        runCurrent()
+        val c = h.transport.last
+        assertFalse("the hello timer starts when the socket opens", c.cancelled)
+        assertEquals(1, h.transport.connections.size)
+        advanceTimeBy(5_000)
+        c.acceptWithHello()
+        runCurrent()
+        assertEquals(ConnPhase.CONNECTED, h.engine.state.value.phase)
+        assertEquals(1, h.host.linkUps)
+    }
+
+    @Test
+    fun anUpgradeThatNeverCompletesStillReconnects() = runTest {
+        val h = started()
+        advanceTimeBy(100_001)
+        runCurrent()
+        assertTrue(h.transport.last.cancelled)
+        advanceTimeBy(2_001)
+        runCurrent()
+        assertEquals(2, h.transport.connections.size)
+    }
+
+    @Test
     fun newPairingReplacesTheSocketAndUnpairingStopsTheLink() = runTest {
         val h = started()
         val c1 = connected(h)

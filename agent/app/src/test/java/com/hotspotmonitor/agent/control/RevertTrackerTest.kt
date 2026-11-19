@@ -1,8 +1,11 @@
 package com.hotspotmonitor.agent.control
 
+import com.hotspotmonitor.agent.core.Clock
+import com.hotspotmonitor.agent.db.ArmedRevertEntity
 import com.hotspotmonitor.agent.protocol.CommandNames
 import com.hotspotmonitor.agent.protocol.RevertConfirm
 import com.hotspotmonitor.agent.protocol.jsonObjectOf
+import com.hotspotmonitor.agent.testutil.TestClock
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
@@ -105,5 +108,95 @@ class RevertTrackerTest {
         t.arm(entry("c_1", appliedAt = 0, mode = RevertConfirm.DASHBOARD, afterS = 30))
         assertEquals(listOf("c_1"), t.takeDue(30_000).map { it.commandId })
         assertNull(t.onKeep("c_1"))
+    }
+
+    // --- supersede (F13) ---------------------------------------------------------------------------
+
+    private fun tether(id: String, appliedAt: Long) = ArmedRevert(
+        commandId = id,
+        undoName = CommandNames.USB_TETHERING,
+        undoArgs = jsonObjectOf("enabled" to true, "function" to "rndis"),
+        mode = RevertConfirm.DASHBOARD,
+        appliedAtMs = appliedAt,
+        deadlineMs = appliedAt + 120_000L,
+    )
+
+    @Test
+    fun aNewerCommandOnTheSameStateSupersedesTheArmedRevert() {
+        val t = RevertTracker()
+        // usb_tethering {enabled:false} armed an undo to rndis; data off armed its own.
+        t.arm(tether("c_off", appliedAt = 0))
+        t.arm(entry("c_data", appliedAt = 0))
+        // Within the window the user switches tethering on with ncm: the stale undo must never run.
+        val superseded = t.supersede(RevertTargets.of(CommandNames.USB_TETHERING)!!, byCommandId = "c_on")
+        assertEquals(listOf("c_off"), superseded.map { it.commandId })
+        assertFalse(t.isArmed("c_off"))
+        assertTrue("another state is not touched", t.isArmed("c_data"))
+        assertEquals(listOf("c_data"), t.takeDue(120_000).map { it.commandId })
+        assertTrue(t.supersede("tether", "c_on").isEmpty())
+    }
+
+    @Test
+    fun revertTargetsMatchTheSimulator() {
+        assertEquals("data", RevertTargets.of(CommandNames.MOBILE_DATA))
+        assertEquals("data", RevertTargets.of(CommandNames.DATA_CYCLE))
+        assertEquals("airplane", RevertTargets.of(CommandNames.AIRPLANE_MODE))
+        assertEquals("airplane", RevertTargets.of(CommandNames.AIRPLANE_CYCLE))
+        assertEquals("tether", RevertTargets.of(CommandNames.USB_TETHERING))
+        assertEquals("network_mode", RevertTargets.of(CommandNames.NETWORK_MODE))
+        assertNull(RevertTargets.of(CommandNames.HOTSPOT))
+        val t = RevertTracker()
+        t.arm(entry("c_1", appliedAt = 0)) // mobile_data off
+        assertEquals("a data cycle takes the data state over", listOf("c_1"), t.supersede(RevertTargets.of(CommandNames.DATA_CYCLE)!!, "c_2").map { it.commandId })
+    }
+
+    // --- restore across a restart (F05) ------------------------------------------------------------
+
+    private fun row(appliedAt: Long, afterS: Int = 120) = ArmedRevertEntity(
+        commandId = "c_1",
+        undoName = CommandNames.NETWORK_MODE,
+        undoArgsJson = """{"mode":"auto"}""",
+        deadlineMs = appliedAt + afterS * 1000L,
+        confirmMode = "agent_link",
+        appliedAtMs = appliedAt,
+    )
+
+    @Test
+    fun restoredDeadlineDoesNotDependOnTheServerOffset() {
+        // Phone clock 1 h behind the Server: the offset was +1 h before the process died.
+        val before = TestClock(system = Clock.parseIso("2026-11-19T10:00:00.000Z")!!, elapsed = 50_000)
+        before.setServerOffset(3_600_000)
+        // network_mode lte_only armed (120 s): persisted in phone wall-clock time.
+        val persisted = row(appliedAt = before.systemNowMs())
+
+        // Restart 30 s later in a new process: offset unknown (0) until hello, elapsed restarted.
+        val after = TestClock(system = before.system + 30_000, elapsed = 5_000)
+        val entry = RevertRestore.restore(persisted, jsonObjectOf("mode" to "auto"), RevertConfirm.AGENT_LINK, after.systemNowMs(), after.elapsedMs())
+        assertFalse(entry.overdueAtStart)
+        assertEquals("90 s left, not 1 h + 90 s", 5_000L + 90_000L, entry.deadlineMs)
+        assertEquals("the window stays 120 s", 120_000L, entry.deadlineMs - entry.appliedAtMs)
+
+        val t = RevertTracker()
+        t.arm(entry)
+        assertTrue(t.takeDue(after.elapsedMs() + 89_999).isEmpty())
+        assertEquals(listOf("c_1"), t.takeDue(after.elapsedMs() + 90_000).map { it.commandId })
+    }
+
+    @Test
+    fun restoredRevertPastItsDeadlineIsDueAtOnceAndAClockSetBackIsCapped() {
+        val applied = Clock.parseIso("2026-11-19T10:00:00.000Z")!!
+        val overdue = RevertRestore.restore(row(applied), jsonObjectOf(), RevertConfirm.AGENT_LINK, applied + 600_000, nowElapsedMs = 1_000)
+        assertTrue(overdue.overdueAtStart)
+        assertEquals(1_000L, overdue.deadlineMs)
+        val t = RevertTracker()
+        t.arm(overdue)
+        assertFalse("a past deadline is never confirmed by a probe", t.shouldProbe(1_000, connected = true))
+        assertEquals(listOf("c_1"), t.takeDue(1_000).map { it.commandId })
+
+        // The phone clock went back 2 days across a reboot: at most the original 120 s window.
+        val capped = RevertRestore.restore(row(applied), jsonObjectOf(), RevertConfirm.AGENT_LINK, applied - 2 * 86_400_000L, nowElapsedMs = 1_000)
+        assertFalse(capped.overdueAtStart)
+        assertEquals(121_000L, capped.deadlineMs)
+        assertEquals(1_000L, capped.appliedAtMs)
     }
 }

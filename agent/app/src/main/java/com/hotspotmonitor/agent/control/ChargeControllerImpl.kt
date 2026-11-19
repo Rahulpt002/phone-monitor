@@ -38,16 +38,27 @@ import kotlinx.coroutines.sync.withLock
  *
  * - HEAT (the watchdog's heat rule) always wins,
  * - MANUAL (the `charging` command) overrides the limit; a manual "on" lasts until the battery is
- *   full, then the limit applies again, so a forgotten top-up never holds the battery at 100 %,
+ *   full, then the limit applies again, so a forgotten top-up never holds the battery at 100 %. A
+ *   manual "off" is refused, or lifted, at or below the safety floor
+ *   (max(alerts.low_battery_pct, 20) %), so a forgotten "off" never drains an unattended phone,
  * - LIMIT, driven by [applyLimit] with hysteresis.
  *
- * Every switch is verified by reading the file back. Events: charging_stopped / charging_resumed.
+ * All three inputs are persisted ([ChargeMemory]), so a restart keeps a heat stop and the limit band.
+ * Every switch is verified by reading the file back; [lastSwitchWrite] lets telemetry tell the plug
+ * change of a switch that cuts USB input from a real power loss. Events: charging_stopped /
+ * charging_resumed.
  */
 class ChargeControllerImpl(private val graph: AgentGraph) : ChargeController {
     private val _state = MutableStateFlow(ChargeState(limitPct = graph.settings.current.watchdog.chargeLimitPct))
     override val state: StateFlow<ChargeState> = _state.asStateFlow()
 
     private val mutex = Mutex()
+    private val memory by lazy { ChargeMemory(graph.prefs) }
+
+    /** The last write to the switch (elapsed ms); read by the telemetry power receiver. */
+    @Volatile
+    internal var lastSwitchWrite: ChargeSwitchWrite? = null
+        private set
 
     // Guarded by mutex.
     private var initialized = false
@@ -58,6 +69,12 @@ class ChargeControllerImpl(private val graph: AgentGraph) : ChargeController {
     private var manual: Boolean? = null
     private var limitStop = false
     private var lastAutoFailure: Pair<Boolean, Long>? = null
+    private var lastBatteryPct: Int? = null
+
+    /** A manual "off" just lifted at the safety floor, reported by the next resume (or by [applyLimit]). */
+    private var pendingFloorLift: FloorLift? = null
+
+    private data class FloorLift(val batteryPct: Int, val floorPct: Int)
 
     /** Paths that accepted writes but did not stop charging (cleared when the profile's list changes). */
     private val ineffective = HashSet<String>()
@@ -97,12 +114,30 @@ class ChargeControllerImpl(private val graph: AgentGraph) : ChargeController {
     override suspend fun setCharging(enabled: Boolean, reason: StopReason): ActionResult = mutex.withLock {
         ensureInitLocked()
         when (reason) {
-            StopReason.HEAT -> heatActive = !enabled
+            StopReason.HEAT -> {
+                heatActive = !enabled
+                memory.heatStop = heatActive
+            }
             StopReason.MANUAL -> {
+                if (!enabled) {
+                    val battery = graph.telemetry.power.value?.percent ?: lastBatteryPct
+                    val floor = floorPct()
+                    if (battery != null && battery <= floor) {
+                        graph.log.w(TAG, "Manual 'charging off' refused: battery $battery % is at or below the $floor % safety floor")
+                        return@withLock ActionResult.failure(
+                            "Charging stays on: the battery is at $battery %, at or below the $floor % safety floor " +
+                                "(max(alerts.low_battery_pct, ${ChargePolicy.MIN_SAFETY_FLOOR_PCT}))",
+                            method = path?.path,
+                        )
+                    }
+                }
                 manual = enabled
                 saveManual()
             }
-            StopReason.LIMIT -> limitStop = !enabled
+            StopReason.LIMIT -> {
+                limitStop = !enabled
+                memory.limitStop = limitStop
+            }
         }
         val p = path ?: return@withLock ActionResult.failure("No charge control on this phone: ${probeNote ?: "not probed"}")
         val applied = applyLocked(automatic = false)
@@ -120,13 +155,28 @@ class ChargeControllerImpl(private val graph: AgentGraph) : ChargeController {
         ensureInitLocked()
         val limit = limitPct.coerceIn(1, 100)
         if (_state.value.limitPct != limit) _state.update { it.copy(limitPct = limit) }
+        if (batteryPct != null) lastBatteryPct = batteryPct
         if (manual == true && batteryPct != null && batteryPct >= FULL_PCT) {
             manual = null
             saveManual()
             graph.log.i(TAG, "Manual charging reached $batteryPct %: back to the $limit % limit")
         }
+        val floor = floorPct()
+        if (ChargePolicy.manualOffLifted(manual, batteryPct, floor)) {
+            manual = null
+            saveManual()
+            pendingFloorLift = FloorLift(batteryPct ?: floor, floor)
+            graph.log.w(TAG, "Battery $batteryPct % reached the $floor % safety floor: manual 'charging off' lifted")
+        }
         limitStop = ChargePolicy.limitStop(limitStop, batteryPct, limit, resumeDropPct)
-        applyLocked(automatic = true)
+        memory.limitStop = limitStop
+        val result = applyLocked(automatic = true)
+        pendingFloorLift?.let { lift ->
+            // Not reported by a resume: heat still blocks charging, or the switch state was unknown.
+            pendingFloorLift = null
+            emitFloorLift(lift, decision())
+        }
+        result
     }
 
     override suspend fun probe(): CapabilityEntry = mutex.withLock {
@@ -159,6 +209,8 @@ class ChargeControllerImpl(private val graph: AgentGraph) : ChargeController {
 
     private suspend fun initLocked(candidates: List<ChargeControlPath>) {
         manual = loadManual()
+        heatActive = memory.heatStop
+        limitStop = memory.limitStop
         path = findPath(candidates)
         probedAtMs = graph.clock.elapsedMs()
         initialized = true
@@ -215,7 +267,9 @@ class ChargeControllerImpl(private val graph: AgentGraph) : ChargeController {
         }
         val value = if (decision.enabled) p.on else p.off
         val before = if (!decision.enabled && confirmedPath != p.path) batterySample() else null
+        lastSwitchWrite = ChargeSwitchWrite(decision.enabled, now)
         val write = graph.shell.writeFile(p.path, value)
+        lastSwitchWrite = ChargeSwitchWrite(decision.enabled, graph.clock.elapsedMs())
         writeSeq++
         val readBack = graph.shell.readFile(p.path)
         val verified = write.ok && (readBack == null || readBack == value.trim())
@@ -236,11 +290,17 @@ class ChargeControllerImpl(private val graph: AgentGraph) : ChargeController {
             // The switch state was unknown (first write after start): nothing actually resumed.
             graph.log.i(TAG, "Charging switch set to on via ${p.path}")
         } else if (decision.enabled) {
-            graph.events.emit(
-                EventKind.CHARGING_RESUMED, Severity.INFO,
-                "Charging resumed" + (previousReason?.let { " (${describe(it)} cleared)" } ?: ""),
-                jsonObjectOf("reason" to previousReason?.let { wire(it) }, "battery_pct" to battery, "limit_pct" to current.limitPct),
-            )
+            val lift = pendingFloorLift
+            pendingFloorLift = null
+            if (lift != null) {
+                emitFloorLift(lift, decision)
+            } else {
+                graph.events.emit(
+                    EventKind.CHARGING_RESUMED, Severity.INFO,
+                    "Charging resumed" + (previousReason?.let { " (${describe(it)} cleared)" } ?: ""),
+                    jsonObjectOf("reason" to previousReason?.let { wire(it) }, "battery_pct" to battery, "limit_pct" to current.limitPct),
+                )
+            }
         } else {
             val reason = decision.reason ?: StopReason.MANUAL
             graph.events.emit(
@@ -254,6 +314,28 @@ class ChargeControllerImpl(private val graph: AgentGraph) : ChargeController {
     }
 
     private fun decision(): ChargeDecision = ChargePolicy.decide(heatActive, manual, limitStop)
+
+    private fun floorPct(): Int = ChargePolicy.safetyFloorPct(graph.settings.current.alerts.lowBatteryPct)
+
+    /** The event for a manual "off" lifted at the safety floor; heat may still keep charging off. */
+    private fun emitFloorLift(lift: FloorLift, decision: ChargeDecision) {
+        val data = jsonObjectOf(
+            "reason" to (decision.reason?.let { wire(it) } ?: wire(StopReason.MANUAL)),
+            "battery_pct" to lift.batteryPct,
+            "limit_pct" to _state.value.limitPct,
+            "safety_floor_pct" to lift.floorPct,
+            "manual_off_lifted" to true,
+        )
+        val why = "the battery is at ${lift.batteryPct} %, at or below the ${lift.floorPct} % safety floor, so a user's 'charging off' was lifted"
+        if (decision.enabled) {
+            graph.events.emit(EventKind.CHARGING_RESUMED, Severity.WARNING, "Charging resumed: $why", data)
+        } else {
+            graph.events.emit(
+                EventKind.CHARGING_STOPPED, Severity.WARNING,
+                "Charging stays off: $why, but ${explain(decision.reason)}", data,
+            )
+        }
+    }
 
     /**
      * Watches the battery after [p] was switched off while charging (phase0.sh charge-discover
@@ -294,6 +376,7 @@ class ChargeControllerImpl(private val graph: AgentGraph) : ChargeController {
             ChargeEffect.NO_EFFECT -> {
                 ineffective += p.path
                 val restore = graph.shell.writeFile(p.path, p.on)
+                lastSwitchWrite = ChargeSwitchWrite(true, graph.clock.elapsedMs())
                 writeSeq++
                 val ma = samples.mapNotNull { it.currentMa }.maxOrNull()
                 val message = "${p.path} accepted '${p.off}' but the battery kept charging" +
@@ -358,26 +441,14 @@ class ChargeControllerImpl(private val graph: AgentGraph) : ChargeController {
 
     private fun wire(reason: StopReason): String = reason.name.lowercase()
 
-    private fun loadManual(): Boolean? = when (graph.prefs.getString(KEY_MANUAL)) {
-        "on" -> true
-        "off" -> false
-        else -> null
-    }
+    private fun loadManual(): Boolean? = memory.manual
 
     private fun saveManual() {
-        graph.prefs.putString(
-            KEY_MANUAL,
-            when (manual) {
-                true -> "on"
-                false -> "off"
-                null -> null
-            },
-        )
+        memory.manual = manual
     }
 
     companion object {
         private const val TAG = "charge"
-        private const val KEY_MANUAL = "control.charge_manual"
         private const val FULL_PCT = 100
         private const val SHELL_TIMEOUT_MS = 5_000L
         private const val PROBE_CACHE_MS = 10_000L

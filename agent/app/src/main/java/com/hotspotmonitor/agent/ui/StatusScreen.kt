@@ -112,7 +112,11 @@ fun StatusScreen(graph: AgentGraph, onOpenSetup: () -> Unit = {}) {
             InfoRow("Outbox", if (pending == 0) "empty" else "$pending waiting", if (pending > OUTBOX_WARN) colors.warn else Color.Unspecified)
             InfoRow(
                 "Clock offset",
-                if (graph.clock.synced) formatSignedSeconds(graph.clock.serverOffsetMs) else "not synced yet",
+                when {
+                    graph.clock.synced -> formatSignedSeconds(graph.clock.serverOffsetMs)
+                    graph.clock.serverOffsetMs != 0L -> "${formatSignedSeconds(graph.clock.serverOffsetMs)} (last known, not synced yet)"
+                    else -> "not synced yet"
+                },
             )
             InfoRow("Fast telemetry", "every ${rates.fastS} s" + if (rates.mirror) " · mirror on" else "")
             InfoRow("Device profile", profile.id)

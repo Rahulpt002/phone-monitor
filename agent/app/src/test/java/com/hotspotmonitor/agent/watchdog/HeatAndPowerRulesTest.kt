@@ -1,7 +1,13 @@
 package com.hotspotmonitor.agent.watchdog
 
+import com.hotspotmonitor.agent.protocol.UsbFunction
 import com.hotspotmonitor.agent.protocol.WatchdogSettings
 import com.hotspotmonitor.agent.protocol.WeeklyReboot
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.test.advanceTimeBy
+import kotlinx.coroutines.test.runCurrent
+import kotlinx.coroutines.test.runTest
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
@@ -202,5 +208,78 @@ class HeatAndPowerRulesTest {
         assertNull(WeeklySchedule.parseTime("25:00"))
         assertNull(WeeklySchedule.parseTime("04:60"))
         assertNull(WeeklySchedule.dueOccurrence(LocalDateTime.of(2026, 11, 22, 4, 0), WeeklyReboot(true, 0, "bad"), null))
+    }
+
+    // --- restored heat state (F07) -----------------------------------------------------------------
+
+    @Test
+    fun restoredHeatStopDoesNotResumeOrRepeatAlertsInsideTheBand() {
+        // Before the restart: 45 °C stopped charging and raised temp_critical.
+        val before = HeatRule()
+        assertTrue(HeatSignal.StopCharging in before.evaluate(45.0, s, canRestRadio = false))
+        // A fresh rule (the old behaviour) at 43 °C: no stop signal, and a duplicate warning.
+        val fresh = HeatRule()
+        assertFalse(HeatSignal.StopCharging in fresh.evaluate(43.0, s, false))
+        assertFalse(fresh.heatStop)
+
+        val restored = HeatRule(heatStop = true, level = HeatLevel.CRITICAL)
+        assertTrue("no resume, no repeated alert at 43 °C", restored.evaluate(43.0, s, false).isEmpty())
+        assertTrue(restored.heatStop)
+        assertEquals(
+            listOf(HeatSignal.ResumeCharging, HeatSignal.Level(HeatLevel.CRITICAL, HeatLevel.NORMAL)),
+            restored.evaluate(39.9, s, false),
+        )
+        assertEquals("level follows the stop by default", HeatLevel.CRITICAL, HeatRule(heatStop = true).level)
+    }
+
+    // --- tether fix function (F28) -----------------------------------------------------------------
+
+    @Test
+    fun tetherFixRestoresTheFunctionLastSeenUp() {
+        assertEquals("ncm", TetherFunction.seen(tetherOn = true, function = UsbFunction.NCM))
+        assertEquals("rndis", TetherFunction.seen(tetherOn = true, function = UsbFunction.RNDIS))
+        assertNull("off: nothing learned", TetherFunction.seen(tetherOn = false, function = UsbFunction.NCM))
+        assertNull(TetherFunction.seen(tetherOn = true, function = UsbFunction.MTP))
+        assertNull(TetherFunction.seen(tetherOn = null, function = null))
+    }
+
+    // --- recovery steps beside the tick (F29) ------------------------------------------------------
+
+    @Test
+    fun heatAndChargeRulesKeepTickingWhileARecoveryStepRuns() = runTest {
+        val steps = StepRunner { _, _ -> }
+        var ticks = 0
+        val tickJob = backgroundScope.launch {
+            while (true) {
+                ticks++ // heat + charge limit, evaluated every tick
+                if (!steps.active) {
+                    // airplane_cycle with airplane_off_s = 600
+                    steps.launch(backgroundScope, "airplane_cycle") { delay(600_000) }
+                }
+                delay(5_000)
+            }
+        }
+        runCurrent()
+        assertTrue(steps.active)
+        advanceTimeBy(60_000)
+        runCurrent()
+        assertTrue("the step is still running", steps.active)
+        assertEquals("ticks kept running every 5 s", 13, ticks)
+        assertFalse("one step at a time", steps.launch(backgroundScope, "reboot") {})
+        advanceTimeBy(540_000)
+        runCurrent()
+        assertEquals(121, ticks)
+        assertTrue("a new step starts once the first one finished", steps.active)
+        tickJob.cancel()
+    }
+
+    @Test
+    fun aFailingStepIsReportedAndFreesTheRunner() = runTest {
+        val errors = mutableListOf<String>()
+        val steps = StepRunner { name, e -> errors += "$name: ${e.message}" }
+        assertTrue(steps.launch(backgroundScope, "data_cycle") { error("boom") })
+        runCurrent()
+        assertEquals(listOf("data_cycle: boom"), errors)
+        assertFalse(steps.active)
     }
 }

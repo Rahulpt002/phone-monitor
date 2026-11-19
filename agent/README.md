@@ -65,13 +65,16 @@ In the Dashboard press **Pair phone**. Scan the QR code with the phone, or for a
 screen run the `adb_command` the Dashboard shows:
 
 ```sh
-adb shell "am start -a android.intent.action.VIEW -d 'hsm://pair?server=https%3A%2F%2Fhsm.onrender.com&code=ABCD2345' --ez auto true"
+adb shell "am start -n com.hotspotmonitor.agent/.ui.AdbPair -a android.intent.action.VIEW -d 'hsm://pair?server=https%3A%2F%2Fhsm.onrender.com&code=ABCD2345' --ez auto true"
 ```
 
 Keep the outer double quotes: `adb shell` passes one string to the phone's shell, and without them
-the `&` in the link ends the command there. `--ez auto true` pairs without a tap (otherwise the
-pairing screen waits for **Pair**); replacing an existing pairing this way also needs
-`--ez replace true`, so another app cannot silently re-point a paired phone.
+the `&` in the link ends the command there. `.ui.AdbPair` is an activity-alias of the pairing
+screen guarded by `android.permission.DUMP`, which only the adb shell uid (and root) holds; only
+this entry honours `--ez auto true` (pair without a tap) and `--ez replace true` (replace an
+existing pairing). The browsable `hsm://pair` link (QR code, other apps, web pages) ignores both
+extras: it always waits for a tap on **Pair**, plus **Replace pairing** when the phone is already
+paired, so no app or web page can silently re-point a paired phone.
 
 The Agent stores the device token encrypted with an Android Keystore key and connects to
 `wss://<server>/ws/agent`.

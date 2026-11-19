@@ -85,7 +85,13 @@ internal data class SyncConfig(
     val stableMs: Long = 60_000,
     /** Wait after 4002 (another connection with this token replaced ours). */
     val replacedBackoffMs: Long = 30_000,
+    /**
+     * After the socket opened (upgrade accepted). The upgrade itself has its own, longer limit
+     * ([upgradeTimeoutMs]): a sleeping free-tier Server answers it only after it has booted.
+     */
     val helloTimeoutMs: Long = 30_000,
+    /** Backstop for DNS + TCP + TLS + upgrade; OkHttp's connect (20 s) and read (75 s) timeouts apply first. */
+    val upgradeTimeoutMs: Long = 100_000,
     /** No `ack` within this time means the link is unhealthy: reconnect and re-send. */
     val ackTimeoutMs: Long = 30_000,
     /** The idle sender re-checks the outbox at least this often (kicks normally wake it). */
@@ -310,6 +316,9 @@ internal class SyncEngine(
     private class Session(val conn: WsConnection, val events: Channel<SocketEvent>, val deviceId: String) {
         /** Elapsed ms when `hello` arrived; -1 before. */
         @Volatile var helloAtMs: Long = -1
+
+        /** The upgrade was accepted (onOpen). */
+        @Volatile var opened: Boolean = false
         var serverError: String? = null
         val acked = MutableStateFlow(0L)
         @Volatile var maxSentSeq: Long = 0
@@ -361,9 +370,9 @@ internal class SyncEngine(
                 events.trySend(SocketEvent.PairingChanged)
             }
             sessionScope.launch {
-                delay(config.helloTimeoutMs)
-                if (!session.helloReceived) {
-                    events.trySend(SocketEvent.LocalFailure("No hello from the Server within ${formatSeconds(config.helloTimeoutMs)}"))
+                delay(config.upgradeTimeoutMs)
+                if (!session.opened) {
+                    events.trySend(SocketEvent.LocalFailure("The Server did not accept the WebSocket within ${formatSeconds(config.upgradeTimeoutMs)}"))
                 }
             }
             for (event in events) {
@@ -387,6 +396,16 @@ internal class SyncEngine(
     private fun handleEvent(session: Session, scope: CoroutineScope, event: SocketEvent): Outcome? = when (event) {
         SocketEvent.Open -> {
             log.i(TAG, "Socket open; waiting for hello")
+            if (!session.opened) {
+                session.opened = true
+                // Counted from the accepted upgrade, so a Server still booting is not cut off.
+                scope.launch {
+                    delay(config.helloTimeoutMs)
+                    if (!session.helloReceived) {
+                        session.events.trySend(SocketEvent.LocalFailure("No hello from the Server within ${formatSeconds(config.helloTimeoutMs)}"))
+                    }
+                }
+            }
             null
         }
         is SocketEvent.Text -> {

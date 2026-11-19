@@ -62,6 +62,34 @@ class ClockTest {
     }
 
     @Test
+    fun lastOffsetIsPersistedAndRestoredUnsyncedAtTheNextStart() {
+        val store = MemoryStore()
+        val phone = Clock.parseIso("2026-11-19T10:00:00.000Z")!!
+        val first = TestClock(system = phone).apply { attachStore(store) }
+        assertEquals("nothing stored yet: offset 0", 0L, first.serverOffsetMs)
+        assertTrue(first.syncWithServer("2026-11-19T11:00:00.000Z")) // phone clock 1 h behind
+        assertEquals(3_600_000L, store.getLong(Clock.KEY_OFFSET, 0))
+
+        // A jitter of a few ms is not written again (prefs writes go to disk).
+        first.setServerOffset(3_600_300L)
+        assertEquals(3_600_000L, store.getLong(Clock.KEY_OFFSET, 0))
+        first.setServerOffset(3_700_000L)
+        assertEquals(3_700_000L, store.getLong(Clock.KEY_OFFSET, 0))
+
+        // Process restart while offline: timestamps keep the Server base, marked unsynced.
+        val restarted = TestClock(system = phone).apply { attachStore(store) }
+        assertFalse(restarted.synced)
+        assertEquals(3_700_000L, restarted.serverOffsetMs)
+        assertEquals(phone + 3_700_000L, restarted.serverNow())
+
+        // A sync that happened before attachStore is never overwritten by the stored value.
+        val synced = TestClock(system = phone).apply { setServerOffset(5_000) }
+        synced.attachStore(store)
+        assertTrue(synced.synced)
+        assertEquals(5_000L, synced.serverOffsetMs)
+    }
+
+    @Test
     fun idsHaveProtocolPrefixes() {
         assertTrue(Ids.event().startsWith("e_"))
         assertTrue(Ids.command().startsWith("c_"))

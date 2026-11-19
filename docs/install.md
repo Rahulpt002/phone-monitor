@@ -18,7 +18,7 @@ adb install -r -g agent/app/build/outputs/apk/debug/app-debug.apk     # Agent (s
 tools/phase0/build-magisk-module.sh                                   # keep-alive module (section 4)
 adb push tools/phase0/dist/hsm-keepalive.zip /sdcard/Download/
 adb shell su -c 'magisk --install-module /sdcard/Download/hsm-keepalive.zip' && adb reboot
-adb shell am start -a android.intent.action.VIEW -d '<deep link from the Dashboard>'   # pairing
+adb shell "am start -n com.hotspotmonitor.agent/.ui.AdbPair -a android.intent.action.VIEW -d '<deep link>' --ez auto true"   # pairing (dead screen)
 tools/phase0/phase0.sh all                                            # re-check everything
 ```
 
@@ -163,6 +163,11 @@ The keep-alive module does not do this.
    (default 60, resume 10% lower), with the 45 °C charging stop (plan 4.2, 6.5).
 3. After installing the Agent, check the Dashboard's Power screen shows the charge-control path
    and that charging stops at the limit.
+4. A manual **Charging off** from the Dashboard never holds the phone at or below
+   max(`alerts.low_battery_pct`, 20) %: it is refused there, and lifted (with a `charging_resumed`
+   event) when the battery falls to that floor, so a forgotten "off" cannot drain an unattended
+   phone. Only the heat stop can keep charging off at a low battery. Heat stop, limit band and the
+   manual override all survive an Agent restart.
 
 ### 2.10 Screen, brightness, radios
 
@@ -288,14 +293,20 @@ adb shell appops get com.hotspotmonitor.agent
 1. In the Dashboard (admin): **Pair phone**. It shows a QR code, the deep link and an adb command,
    valid for 15 minutes.
 2. Screen works: scan the QR code with the phone's camera app; it opens the Agent's pairing
-   screen. Or type the server URL and code in the Agent's Pairing screen.
+   screen, where you tap **Pair**. If the phone is already paired, a second confirmation
+   (**Replace pairing**) is needed. Or type the server URL and code in the Agent's Pairing screen.
 3. Dead screen: run the adb command from the Dashboard, for example:
 
    ```sh
-   adb shell am start -a android.intent.action.VIEW -d 'hsm://pair?server=https%3A%2F%2Fhsm.onrender.com&code=ABCD2345'
+   adb shell "am start -n com.hotspotmonitor.agent/.ui.AdbPair -a android.intent.action.VIEW -d 'hsm://pair?server=https%3A%2F%2Fhsm.onrender.com&code=ABCD2345' --ez auto true"
    ```
 
-   Keep the single quotes: the `&` must reach the phone.
+   Copy it as shown: the outer double quotes keep the single quotes for the phone's shell, so the
+   `&` reaches the phone. `.ui.AdbPair` is an entry of the pairing screen that only adb (or root)
+   can start (it is guarded by `android.permission.DUMP`); only there does `--ez auto true` pair
+   without a tap. To replace an existing pairing that way, add `--ez replace true` before the
+   closing double quote. The QR code / browsable link ignores both extras and always waits for a
+   tap, so no other app or web page can re-pair the phone.
 4. Within seconds the Dashboard shows the phone online with live values. If not:
    `adb logcat | grep -i hotspotmonitor`, check the phone has internet over the SIM and that the
    Server URL is reachable from it.
@@ -334,7 +345,13 @@ through the VPN (plan 10).
    adb reboot
    ```
 
-   What it applies, if you prefer to do it by hand (as root):
+   It fails closed: adbd listens on TCP only after the rules are verified for both IPv4 and
+   IPv6. If `iptables` or `ip6tables` fails (or is missing), TCP adb stays off (or is switched off
+   again), the reason goes to logcat (`adb logcat -s hsm-adb-vpn`), and it retries every minute;
+   the rules are re-checked every 10 minutes. USB adb is never affected.
+
+   What it applies, if you prefer to do it by hand (as root; check that every command succeeds
+   before the last line, which opens the port):
 
    ```sh
    iptables -N HSM_ADB

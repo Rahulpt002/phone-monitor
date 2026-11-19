@@ -1,5 +1,7 @@
 package com.hotspotmonitor.agent.control
 
+import com.hotspotmonitor.agent.db.ArmedRevertEntity
+import com.hotspotmonitor.agent.protocol.CommandNames
 import com.hotspotmonitor.agent.protocol.REVERT_SETTLE_S
 import com.hotspotmonitor.agent.protocol.RevertConfirm
 import kotlinx.serialization.json.JsonObject
@@ -13,7 +15,50 @@ internal data class ArmedRevert(
     val mode: RevertConfirm,
     val appliedAtMs: Long,
     val deadlineMs: Long,
+    /** Restored at start with its deadline already past: the Agent was not running at the deadline. */
+    val overdueAtStart: Boolean = false,
 )
+
+/**
+ * Which phone state each command changes (the simulator's REVERT_TARGET). A newer command on the
+ * same target supersedes an armed revert of an earlier one, so a stale undo never overrides it.
+ */
+internal object RevertTargets {
+    private val TARGETS = mapOf(
+        CommandNames.MOBILE_DATA to "data",
+        CommandNames.DATA_CYCLE to "data",
+        CommandNames.AIRPLANE_MODE to "airplane",
+        CommandNames.AIRPLANE_CYCLE to "airplane",
+        CommandNames.USB_TETHERING to "tether",
+        CommandNames.NETWORK_MODE to "network_mode",
+    )
+
+    fun of(commandName: String): String? = TARGETS[commandName]
+}
+
+/**
+ * Persisted revert times ([ArmedRevertEntity.deadlineMs] / [ArmedRevertEntity.appliedAtMs]) are
+ * phone wall-clock ms (Clock.systemNowMs). That base is the same before and after an Agent restart,
+ * unlike Clock.serverNow, whose offset is only re-learned at the next `hello` (a phone clock that is
+ * off would otherwise shift a restored deadline by the whole offset). The remaining time is capped
+ * at the revert window, so a phone clock set back across a reboot cannot stretch it.
+ */
+internal object RevertRestore {
+    fun restore(row: ArmedRevertEntity, undoArgs: JsonObject, mode: RevertConfirm, nowWallMs: Long, nowElapsedMs: Long): ArmedRevert {
+        val windowMs = (row.deadlineMs - row.appliedAtMs).coerceAtLeast(0)
+        val remainingMs = (row.deadlineMs - nowWallMs).coerceAtMost(windowMs)
+        val deadline = nowElapsedMs + remainingMs.coerceAtLeast(0)
+        return ArmedRevert(
+            commandId = row.commandId,
+            undoName = row.undoName,
+            undoArgs = undoArgs,
+            mode = mode,
+            appliedAtMs = deadline - windowMs,
+            deadlineMs = deadline,
+            overdueAtStart = remainingMs <= 0,
+        )
+    }
+}
 
 /**
  * The auto-revert state machine of docs/protocol.md 3.5 (plan 6.4 rule 1), without I/O:
@@ -51,6 +96,17 @@ internal class RevertTracker(
 
     @Synchronized
     fun disarm(commandId: String): ArmedRevert? = armed.remove(commandId)
+
+    /**
+     * A newer command ([byCommandId]) changes the state of [target]: the entries of earlier commands
+     * on that target leave the tracker (oldest first) without their undo running.
+     */
+    @Synchronized
+    fun supersede(target: String, byCommandId: String): List<ArmedRevert> {
+        val doomed = armed.values.filter { it.commandId != byCommandId && RevertTargets.of(it.undoName) == target }
+        doomed.forEach { armed.remove(it.commandId) }
+        return doomed
+    }
 
     /** The link came back (after `hello`): one probe is due as soon as an entry is past its settle time. */
     @Synchronized

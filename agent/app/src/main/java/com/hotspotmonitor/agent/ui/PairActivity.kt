@@ -31,17 +31,23 @@ import com.hotspotmonitor.agent.AgentApp
 import com.hotspotmonitor.agent.BuildConfig
 import com.hotspotmonitor.agent.core.AgentGraph
 import com.hotspotmonitor.agent.core.PairingInfo
+import com.hotspotmonitor.agent.sync.PairLaunch
 import com.hotspotmonitor.agent.sync.PairLink
 import com.hotspotmonitor.agent.sync.PairingUrls
 import kotlinx.coroutines.delay
 
 /**
- * Handles the pairing deep link `hsm://pair?server=<urlencoded base url>&code=<code>` from a QR
- * code or `adb shell "am start -a android.intent.action.VIEW -d '<deep_link>'"`.
+ * Handles the pairing deep link `hsm://pair?server=<urlencoded base url>&code=<code>`.
  *
- * With a working screen it shows the Server and one Pair button. Launched with `--ez auto true`
- * (dead screen, plan 6.1 "Headless operation") it pairs immediately; replacing an existing pairing
- * that way also needs `--ez replace true`, so another app cannot silently re-point a paired phone.
+ * Two entries (docs/protocol.md 2):
+ * - the browsable link (QR code, another app, a web page): shows the Server and a Pair button; a
+ *   tap is always needed, and replacing an existing pairing needs a second confirmation. The
+ *   `auto` / `replace` extras are ignored here;
+ * - the activity-alias `.ui.AdbPair`, guarded by android.permission.DUMP so only adb (shell uid) or
+ *   root can start it: `adb shell "am start -n com.hotspotmonitor.agent/.ui.AdbPair -a
+ *   android.intent.action.VIEW -d '<deep_link>' --ez auto true"` pairs at once (dead screen, plan
+ *   6.1 "Headless operation"); replacing an existing pairing that way also needs `--ez replace true`.
+ * [PairLaunch.decide] makes that choice from the launch intent's component.
  */
 class PairActivity : ComponentActivity() {
     private lateinit var graph: AgentGraph
@@ -50,6 +56,12 @@ class PairActivity : ComponentActivity() {
     private var linkError by mutableStateOf<String?>(null)
     private var autoNote by mutableStateOf<String?>(null)
     private var autoStarted by mutableStateOf(false)
+
+    /** The user tapped Pair while paired: asking to confirm the replacement. */
+    private var confirmReplace by mutableStateOf(false)
+
+    /** The link last approved to replace a pairing (the Replace confirmation, or adb's auto entry). */
+    private var approvedLink by mutableStateOf<PairLink?>(null)
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -85,16 +97,52 @@ class PairActivity : ComponentActivity() {
         graph.log.i(TAG, "Pairing link for ${parsed.server.take(200)}")
         if (!firstLaunch) return
         PairingRunner.reset()
-        val auto = intent?.getBooleanExtra(PairLink.EXTRA_AUTO, false) == true
-        if (!auto) return
-        val replace = intent?.getBooleanExtra(PairLink.EXTRA_REPLACE, false) == true
-        if (graph.pairingState.paired.value && !replace) {
-            autoNote = "Already paired. Automatic pairing replaces a pairing only with --ez replace true."
-            graph.log.w(TAG, "Automatic pairing refused: already paired and no replace extra")
-            return
+        confirmReplace = false
+        val launch = PairLaunch.decide(
+            componentClass = intent?.component?.className,
+            auto = intent?.getBooleanExtra(PairLink.EXTRA_AUTO, false) == true,
+            replace = intent?.getBooleanExtra(PairLink.EXTRA_REPLACE, false) == true,
+            paired = graph.pairingState.paired.value,
+        )
+        when (launch) {
+            PairLaunch.TAP -> Unit
+            PairLaunch.TAP_AUTO_IGNORED -> {
+                autoNote = "Automatic pairing works only through adb (am start -n ${PairingUrls.ADB_COMPONENT}). Tap Pair to continue."
+                graph.log.w(TAG, "Pairing link with the auto extra from outside the adb entry: waiting for a tap")
+            }
+            PairLaunch.TAP_ALREADY_PAIRED -> {
+                autoNote = "Already paired. Automatic pairing replaces a pairing only with --ez replace true."
+                graph.log.w(TAG, "Automatic pairing refused: already paired and no replace extra")
+            }
+            PairLaunch.AUTO -> {
+                graph.log.i(TAG, "Automatic (headless) pairing requested through adb")
+                autoStarted = startPairing(parsed, approvesReplace = true)
+            }
         }
-        graph.log.i(TAG, "Automatic (headless) pairing requested")
-        autoStarted = PairingRunner.start(this, parsed.server, parsed.code)
+    }
+
+    /**
+     * [approvesReplace]: this start was approved to replace an existing pairing, so "Try again" for
+     * the same link needs no new confirmation. A tap while unpaired approves only pairing.
+     */
+    private fun startPairing(target: PairLink, approvesReplace: Boolean): Boolean {
+        confirmReplace = false
+        val started = PairingRunner.start(this, target.server, target.code)
+        if (started && approvesReplace) approvedLink = target
+        return started
+    }
+
+    @Composable
+    private fun ReplaceConfirmation(target: PairLink, paired: PairingInfo, colors: StatusColors) {
+        // Second confirmation: this link would re-point a paired phone to another Server.
+        Text(
+            "Replace the pairing with ${paired.serverUrl} by ${target.server}? The phone then reports to " +
+                "and takes commands from that Server only.",
+            color = colors.bad,
+            style = MaterialTheme.typography.bodyMedium,
+        )
+        Button(onClick = { startPairing(target, approvesReplace = true) }) { Text("Replace pairing") }
+        OutlinedButton(onClick = { finish() }) { Text("Keep the current pairing") }
     }
 
     @Composable
@@ -138,7 +186,8 @@ class PairActivity : ComponentActivity() {
                     horizontalArrangement = Arrangement.spacedBy(12.dp),
                 ) {
                     CircularProgressIndicator(Modifier.size(28.dp))
-                    Text("Pairing… a sleeping Server can take up to a minute.")
+                    val other = if (state.server != target.server.trim()) " with ${state.server}" else ""
+                    Text("Pairing$other… a sleeping Server can take up to a minute.")
                 }
                 is PairUiState.Success -> {
                     Text(
@@ -159,10 +208,30 @@ class PairActivity : ComponentActivity() {
                 }
                 is PairUiState.Failed -> {
                     Text(state.message, color = colors.bad)
-                    Button(onClick = { PairingRunner.start(this@PairActivity, target.server, target.code) }) { Text("Try again") }
+                    if (confirmReplace && paired != null) {
+                        ReplaceConfirmation(target, paired, colors)
+                    } else {
+                        // The link shown may have arrived (onNewIntent) while another pairing ran:
+                        // retrying it over an existing pairing needs the same confirmation as Pair.
+                        Button(onClick = {
+                            if (PairLaunch.retryNeedsConfirm(target, approvedLink, paired != null)) {
+                                confirmReplace = true
+                            } else {
+                                startPairing(target, approvesReplace = paired != null)
+                            }
+                        }) { Text("Try again") }
+                    }
                 }
-                PairUiState.Idle -> {
-                    Button(onClick = { PairingRunner.start(this@PairActivity, target.server, target.code) }) { Text("Pair") }
+                PairUiState.Idle -> if (confirmReplace && paired != null) {
+                    ReplaceConfirmation(target, paired, colors)
+                } else {
+                    Button(onClick = {
+                        if (paired != null) {
+                            confirmReplace = true
+                        } else {
+                            startPairing(target, approvesReplace = false)
+                        }
+                    }) { Text("Pair") }
                     OutlinedButton(onClick = { finish() }) { Text("Cancel") }
                 }
             }

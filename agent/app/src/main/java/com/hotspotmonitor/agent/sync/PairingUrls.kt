@@ -63,15 +63,20 @@ internal object PairingUrls {
         "hsm://pair?server=${URLEncoder.encode(serverUrl, "UTF-8")}&code=${URLEncoder.encode(code, "UTF-8")}"
 
     /**
-     * The ADB command for a phone with a dead screen. Double quotes on the host keep the single
-     * quotes for the phone's shell, which would otherwise split the link at '&'. [auto] pairs
-     * without a tap (PairActivity); [replace] allows it to replace an existing pairing.
+     * The ADB command for a phone with a dead screen (PairCodeResponse.adb_command). It starts the
+     * activity-alias `.ui.AdbPair`, which only adb (shell uid) or root may start, so only this entry
+     * honours [auto] (pair without a tap) and [replace] (replace an existing pairing). Double quotes
+     * on the host keep the single quotes for the phone's shell, which would otherwise split the
+     * link at '&'.
      */
     fun adbCommand(deepLink: String, auto: Boolean = true, replace: Boolean = false): String {
         val extras = buildString {
             if (auto) append(" --ez ${PairLink.EXTRA_AUTO} true")
             if (auto && replace) append(" --ez ${PairLink.EXTRA_REPLACE} true")
         }
-        return "adb shell \"am start -a android.intent.action.VIEW -d '$deepLink'$extras\""
+        return "adb shell \"am start -n $ADB_COMPONENT -a android.intent.action.VIEW -d '$deepLink'$extras\""
     }
+
+    /** `am start -n` target of [adbCommand]. */
+    const val ADB_COMPONENT = "com.hotspotmonitor.agent/.ui.AdbPair"
 }

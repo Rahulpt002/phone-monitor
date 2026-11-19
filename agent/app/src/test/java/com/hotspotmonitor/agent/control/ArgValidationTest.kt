@@ -110,6 +110,8 @@ class ArgValidationTest {
         )
         assertEquals(ParsedCommand.Shell("id", 30), parse(CommandNames.SHELL, buildJsonObject { put("cmd", "id") }))
         assertEquals(ParsedCommand.Shell("id", 300), parse(CommandNames.SHELL, buildJsonObject { put("cmd", "id"); put("timeout_s", 300) }))
+        // The Dashboard console and the Server accept 1..600 s.
+        assertEquals(ParsedCommand.Shell("id", 600), parse(CommandNames.SHELL, buildJsonObject { put("cmd", "id"); put("timeout_s", 600) }))
         assertEquals(
             ParsedCommand.SendSms("+15551234", "hi"),
             parse(CommandNames.SEND_SMS, buildJsonObject { put("to", "+1 555-1234"); put("body", "hi") }),
@@ -141,7 +143,8 @@ class ArgValidationTest {
         assertInvalid(CommandNames.BRIGHTNESS, buildJsonObject { put("level", 300) })
         assertInvalid(CommandNames.CHARGE_LIMIT, buildJsonObject { put("percent", 10) })
         assertInvalid(CommandNames.APP_DISABLE, buildJsonObject { put("package", "com.x && reboot") })
-        assertInvalid(CommandNames.SHELL, buildJsonObject { put("cmd", "id"); put("timeout_s", 301) })
+        assertInvalid(CommandNames.SHELL, buildJsonObject { put("cmd", "id"); put("timeout_s", 601) })
+        assertInvalid(CommandNames.SHELL, buildJsonObject { put("cmd", "id"); put("timeout_s", 0) })
         assertInvalid(CommandNames.SEND_SMS, buildJsonObject { put("to", "+1555"); put("body", "x".repeat(1601)) })
         assertInvalid(CommandNames.USSD, buildJsonObject { put("code", "1234") })
         assertInvalid(CommandNames.WATCHDOG_SIMULATE, buildJsonObject { put("scenario", "power_cut"); put("duration_s", 60) })

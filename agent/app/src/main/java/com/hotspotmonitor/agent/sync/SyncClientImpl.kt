@@ -18,6 +18,8 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.collectLatest
+import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.drop
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.merge
@@ -27,7 +29,7 @@ import java.util.concurrent.TimeUnit
 /**
  * The SyncClient module (ARCHITECTURE.md section 4): wires [SyncEngine] (socket, outbox sender,
  * dispatch) and [TelemetryScheduler] (tier schedule) to the graph, and reconnects on Android's
- * network-available callback.
+ * network-available callback. [TelemetryDetail] trims the bulky lists from background telemetry.
  */
 class SyncClientImpl(private val graph: AgentGraph) : SyncClient {
     private val transport = OkHttpWsTransport(
@@ -42,6 +44,7 @@ class SyncClientImpl(private val graph: AgentGraph) : SyncClient {
     }
 
     private val host = GraphHost()
+    private val detail = TelemetryDetail()
 
     private val engine: SyncEngine by lazy {
         SyncEngine(graph.clock, graph.log, graph.outbox, graph.settings, transport, host)
@@ -66,6 +69,7 @@ class SyncClientImpl(private val graph: AgentGraph) : SyncClient {
             slowIntervalS = graph.settings.settings.map { it.telemetry.slowS },
         )
         watchStaticChanges(scope)
+        watchDashboardOpen(scope)
         registerNetworkCallback()
     }
 
@@ -102,6 +106,25 @@ class SyncClientImpl(private val graph: AgentGraph) : SyncClient {
                 graph.log.i(TAG, "Sending static telemetry: $what changed")
                 scheduler.publish(setOf(TelemetryTier.STATIC))
             }
+        }
+    }
+
+    private fun dashboardOpen(): Boolean = TelemetryDetail.dashboardOpen(engine.rates.value, graph.settings.current.telemetry)
+
+    /** A Dashboard opened: a slow message with the detail lists (zones, top, per_if) right away. */
+    private fun watchDashboardOpen(scope: CoroutineScope) {
+        scope.launch {
+            combine(engine.rates, graph.settings.settings) { rates, settings -> TelemetryDetail.dashboardOpen(rates, settings.telemetry) }
+                .distinctUntilChanged()
+                .drop(1)
+                .collectLatest { open ->
+                    if (!open) return@collectLatest
+                    // Coalesce with the slow message sent right after hello (link up with a Dashboard open).
+                    delay(STATIC_DEBOUNCE_MS)
+                    val since = scheduler.msSinceLastAttempt(TelemetryTier.SLOW)
+                    if (since != null && since < STATIC_COALESCE_MS) return@collectLatest
+                    scheduler.publish(setOf(TelemetryTier.SLOW))
+                }
         }
     }
 
@@ -193,12 +216,12 @@ class SyncClientImpl(private val graph: AgentGraph) : SyncClient {
                 if (g.radio == null && g.net == null) {
                     null
                 } else {
-                    TelemetryMsg(ts = graph.clock.isoNow(), tier = tier, radio = g.radio, net = g.net)
+                    detail.fast(TelemetryMsg(ts = graph.clock.isoNow(), tier = tier, radio = g.radio, net = g.net), dashboardOpen())
                 }
             }
             TelemetryTier.SLOW -> {
                 val g = graph.telemetry.collectSlow()
-                TelemetryMsg(
+                val full = TelemetryMsg(
                     ts = graph.clock.isoNow(),
                     tier = tier,
                     power = g.power,
@@ -208,6 +231,7 @@ class SyncClientImpl(private val graph: AgentGraph) : SyncClient {
                     traffic = g.traffic,
                     position = g.position,
                 )
+                detail.slow(full, graph.clock.elapsedMs(), dashboardOpen())
             }
             TelemetryTier.STATIC -> {
                 val g = graph.telemetry.collectStatic()

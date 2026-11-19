@@ -8,6 +8,7 @@ import com.hotspotmonitor.agent.core.Ids
 import com.hotspotmonitor.agent.db.ArmedRevertEntity
 import com.hotspotmonitor.agent.db.CommandLogEntity
 import com.hotspotmonitor.agent.protocol.AgentJson
+import com.hotspotmonitor.agent.protocol.BufferedMsg
 import com.hotspotmonitor.agent.protocol.CapabilityEntry
 import com.hotspotmonitor.agent.protocol.CapabilityMap
 import com.hotspotmonitor.agent.protocol.CmdAckMsg
@@ -32,6 +33,7 @@ import com.hotspotmonitor.agent.protocol.StopReason
 import com.hotspotmonitor.agent.protocol.TelemetryTier
 import com.hotspotmonitor.agent.protocol.jsonObjectOf
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.delay
@@ -62,9 +64,17 @@ import java.util.Collections
  * coroutine, so the SyncClient's receive loop is never blocked by a long command. Every accepted
  * command gets a `cmd_result` (also when it fails or times out).
  *
- * Auto-revert: the undo action is computed and persisted (ArmedRevertEntity) before the change is
- * applied; [RevertTracker] drives the confirmation (probe round-trip or `cmd_keep`) and the
- * deadline. Reports (`cmd_ack`, `cmd_result`, `cmd_revert`) all go through the outbox.
+ * A command id is never executed twice: a duplicate (the Server re-sends a command whose ack it has
+ * not seen) is ignored and its latest report is enqueued again ([DuplicateReports]).
+ *
+ * Auto-revert: the undo action is computed and persisted (ArmedRevertEntity, phone wall-clock times,
+ * see [RevertRestore]) before the change is applied; [RevertTracker] drives the confirmation (probe
+ * round-trip or `cmd_keep`) and the deadline. A newer command on the same state supersedes an armed
+ * revert ([RevertTargets]): the earlier one is reported `kept` without its undo, and when the newer
+ * command arms a revert itself it inherits the earlier undo, so an unconfirmed chain still returns to
+ * the last state that worked. Persisted reverts are restored first at start; commands that arm a
+ * revert and `cmd_keep` wait for that ([restored]). Reports (`cmd_ack`, `cmd_result`, `cmd_revert`)
+ * all go through the outbox.
  */
 class CommandExecutorImpl(private val graph: AgentGraph) : CommandExecutor {
     private val _capabilities = MutableStateFlow<CapabilityMap>(emptyMap())
@@ -73,6 +83,21 @@ class CommandExecutorImpl(private val graph: AgentGraph) : CommandExecutor {
     private val probeMutex = Mutex()
     private val reverts = RevertTracker()
     private val inFlight: MutableSet<String> = Collections.synchronizedSet(HashSet())
+
+    /** Serialises the armed_revert table and the tracker: restore, prepare, commit, abandon, supersede. */
+    private val revertMutex = Mutex()
+
+    /** Command ids whose revert is being undone or kept right now (row still present). */
+    private val resolving: MutableSet<String> = Collections.synchronizedSet(HashSet())
+
+    /** Completed once the persisted reverts of this start are back in the tracker. */
+    @Volatile
+    private var restored = CompletableDeferred<Unit>()
+
+    /** The ack of each recent command id, in case its command log row could not be written. */
+    private val recentAcks = object : LinkedHashMap<String, CmdAckMsg>() {
+        override fun removeEldestEntry(eldest: MutableMap.MutableEntry<String, CmdAckMsg>?): Boolean = size > RECENT_IDS
+    }
 
     @Volatile
     private var scope: CoroutineScope? = null
@@ -105,11 +130,18 @@ class CommandExecutorImpl(private val graph: AgentGraph) : CommandExecutor {
 
     override fun start(scope: CoroutineScope) {
         this.scope = scope
+        if (restored.isCompleted) restored = CompletableDeferred()
+        val gate = restored
         scope.launch {
-            guarded("restore interrupted cycles") { (graph.controls as? ControlsImpl)?.restoreInterruptedCycles() }
-            guarded("load capabilities") { loadStoredCapabilities() }
+            // First and quick (a DB read): commands and cmd_keep from the new link wait for it.
+            try {
+                guarded("restore armed reverts") { restoreArmedReverts() }
+            } finally {
+                gate.complete(Unit)
+            }
             guarded("pending reboot result") { reportPendingReboot() }
-            guarded("restore armed reverts") { restoreArmedReverts() }
+            guarded("load capabilities") { loadStoredCapabilities() }
+            guarded("restore interrupted cycles") { (graph.controls as? ControlsImpl)?.restoreInterruptedCycles() }
             guarded("prune command log") { commandLog.deleteOlderThan(graph.clock.serverNow() - COMMAND_LOG_RETENTION_MS) }
         }
         scope.launch { revertLoop() }
@@ -130,27 +162,43 @@ class CommandExecutorImpl(private val graph: AgentGraph) : CommandExecutor {
 
     override suspend fun handle(cmd: CmdMsg) {
         if (!inFlight.add(cmd.id)) {
-            log.i(TAG, "Ignoring duplicate ${cmd.name} ${cmd.id}: still running")
+            // Still being checked or running. Its ack is sent again only once it exists: an early
+            // "accepted" could otherwise block a rejection that is still to come.
+            val ack = synchronized(recentAcks) { recentAcks[cmd.id] }
+            log.i(TAG, "Duplicate ${cmd.name} ${cmd.id}: still running" + if (ack != null) "; acknowledging it again" else "")
+            if (ack != null) enqueueReports(listOf(ack.copy(ts = graph.clock.isoNow())))
             return
         }
         var accepted: CheckResult.Accepted? = null
         var handedOff = false
         try {
-            if (commandLog.get(cmd.id) != null) {
-                log.i(TAG, "Ignoring duplicate ${cmd.name} ${cmd.id}: already handled")
+            val handled = commandLog.get(cmd.id)
+            if (handled != null) {
+                log.i(TAG, "Duplicate ${cmd.name} ${cmd.id}: already handled (${handled.status}); sending its report again")
+                enqueueReports(DuplicateReports.forLog(handled, armedDeadlineIso(cmd.id), graph.clock.isoNow()))
+                return
+            }
+            val recent = synchronized(recentAcks) { recentAcks[cmd.id] }
+            if (recent != null) {
+                log.i(TAG, "Duplicate ${cmd.name} ${cmd.id}: already handled (no log row); acknowledging it again")
+                enqueueReports(listOf(recent.copy(ts = graph.clock.isoNow())))
                 return
             }
             when (val decision = runChecks(cmd.id, cmd.name, cmd.args, cmd.sentAt)) {
                 is CheckResult.Rejected -> {
+                    val ack = CmdAckMsg(id = cmd.id, accepted = false, reason = decision.reason, ts = graph.clock.isoNow())
+                    synchronized(recentAcks) { recentAcks[cmd.id] = ack }
                     saveLog(cmd.id, cmd.name, cmd.args, CommandSource.DASHBOARD, CommandStatus.REJECTED, "${wire(decision.reason)}: ${decision.message}")
-                    graph.outbox.enqueue(CmdAckMsg(id = cmd.id, accepted = false, reason = decision.reason, ts = graph.clock.isoNow()))
+                    graph.outbox.enqueue(ack)
                     graph.sync.kick()
                     log.i(TAG, "Rejected ${cmd.name} ${cmd.id}: ${wire(decision.reason)} (${decision.message})")
                 }
                 is CheckResult.Accepted -> {
                     accepted = decision
+                    val ack = CmdAckMsg(id = cmd.id, accepted = true, ts = graph.clock.isoNow())
+                    synchronized(recentAcks) { recentAcks[cmd.id] = ack }
                     saveLog(cmd.id, cmd.name, cmd.args, CommandSource.DASHBOARD, CommandStatus.ACKED, null)
-                    graph.outbox.enqueue(CmdAckMsg(id = cmd.id, accepted = true, ts = graph.clock.isoNow()))
+                    graph.outbox.enqueue(ack)
                     graph.sync.kick()
                     val job = (scope ?: graph.appScope).launch { execute(cmd, decision) }
                     job.invokeOnCompletion {
@@ -218,6 +266,22 @@ class CommandExecutorImpl(private val graph: AgentGraph) : CommandExecutor {
         updateLogStatus(cmd.id, status, result.error ?: result.output)
         log.i(TAG, "${cmd.name} ${cmd.id}: ${if (result.ok) "ok" else "failed (${result.error})"} in $durationMs ms" +
             (deadlineIso?.let { ", revert armed until $it" } ?: ""))
+    }
+
+    private suspend fun enqueueReports(reports: List<BufferedMsg>) {
+        if (reports.isEmpty()) return
+        for (msg in reports) graph.outbox.enqueue(msg)
+        graph.sync.kick()
+    }
+
+    /** Server-time ISO deadline of the persisted revert of [commandId], or null. */
+    private suspend fun armedDeadlineIso(commandId: String): String? = try {
+        revertDao.get(commandId)?.let { Clock.formatIso(it.deadlineMs + graph.clock.serverOffsetMs) }
+    } catch (e: CancellationException) {
+        throw e
+    } catch (e: Exception) {
+        log.w(TAG, "Could not read the armed revert of $commandId", e)
+        null
     }
 
     private suspend fun reportResult(id: String, result: ActionResult, durationMs: Long, revertDeadline: String?) {
@@ -487,6 +551,10 @@ class CommandExecutorImpl(private val graph: AgentGraph) : CommandExecutor {
             }
             is CheckResult.Accepted -> {
                 result = try {
+                    if (source != CommandSource.WATCHDOG && source != CommandSource.SCHEDULE) {
+                        awaitRestored()
+                        revertMutex.withLock { supersedeLocked(id, name) }
+                    }
                     runWithTimeout(decision.parsed, source, id)
                 } catch (e: CancellationException) {
                     throw e
@@ -533,33 +601,82 @@ class CommandExecutorImpl(private val graph: AgentGraph) : CommandExecutor {
 
     override fun onKeep(id: String) {
         val entry = reverts.onKeep(id)
-        if (entry == null) {
+        if (entry != null) {
+            launchReport("keep after cmd_keep") { keep(entry, KEPT_FROM_DASHBOARD) }
+            return
+        }
+        if (restored.isCompleted) {
             log.i(TAG, "cmd_keep for $id: no armed revert (already kept or reverted)")
             return
         }
-        launchReport("keep after cmd_keep") { keep(entry, "Kept from the Dashboard") }
+        // Arrived before the persisted reverts were restored: keep it once they are.
+        launchReport("keep after restore") {
+            awaitRestored()
+            val late = reverts.onKeep(id)
+            if (late == null) {
+                log.i(TAG, "cmd_keep for $id: no armed revert (already kept or reverted)")
+            } else {
+                keep(late, KEPT_FROM_DASHBOARD)
+            }
+        }
     }
 
     override fun onConnected() {
         reverts.onConnected()
     }
 
+    /**
+     * Supersedes armed reverts on the same state, then persists this command's undo when it needs a
+     * revert. Runs before the change is applied.
+     */
     private suspend fun prepareRevert(cmd: CmdMsg, accepted: CheckResult.Accepted): PreparedRevert? {
-        val mode = cmd.revertConfirm ?: accepted.spec.revertFor(cmd.args) ?: return null
-        val (undoName, undoArgs) = undoFor(accepted.parsed) ?: return null
-        val afterS = (cmd.revertAfterS ?: graph.settings.current.commands.revertAfterS).coerceIn(MIN_REVERT_S, MAX_REVERT_S)
-        val now = graph.clock.serverNow()
-        revertDao.upsert(
-            ArmedRevertEntity(
-                commandId = cmd.id,
-                undoName = undoName,
-                undoArgsJson = undoArgs.toString(),
-                deadlineMs = now + afterS * 1000L,
-                confirmMode = mode.wire,
-                appliedAtMs = now,
-            ),
-        )
-        return PreparedRevert(cmd.id, undoName, undoArgs, mode, afterS)
+        awaitRestored()
+        return revertMutex.withLock {
+            val superseded = supersedeLocked(cmd.id, cmd.name)
+            val mode = cmd.revertConfirm ?: accepted.spec.revertFor(cmd.args) ?: return@withLock null
+            // An earlier unconfirmed change on this state: undo back to the state before it.
+            val inherited = superseded.firstOrNull()?.let { it.undoName to it.undoArgs }
+            val (undoName, undoArgs) = inherited ?: undoFor(accepted.parsed) ?: return@withLock null
+            val afterS = (cmd.revertAfterS ?: graph.settings.current.commands.revertAfterS).coerceIn(MIN_REVERT_S, MAX_REVERT_S)
+            val now = graph.clock.systemNowMs()
+            revertDao.upsert(
+                ArmedRevertEntity(
+                    commandId = cmd.id,
+                    undoName = undoName,
+                    undoArgsJson = undoArgs.toString(),
+                    deadlineMs = now + afterS * 1000L,
+                    confirmMode = mode.wire,
+                    appliedAtMs = now,
+                ),
+            )
+            PreparedRevert(cmd.id, undoName, undoArgs, mode, afterS)
+        }
+    }
+
+    /**
+     * A newer command ([byId], [name]) changes a state with armed reverts of earlier commands: they
+     * are reported `kept` (the user took the state over; no undo, no `revert` event). Call with
+     * [revertMutex] held. Returns the superseded entries, oldest first.
+     */
+    private suspend fun supersedeLocked(byId: String, name: String): List<ArmedRevert> {
+        val target = RevertTargets.of(name) ?: return emptyList()
+        val superseded = reverts.supersede(target, byId)
+        for (entry in superseded) {
+            val detail = "Superseded by a newer ${label(name)} command ($byId)"
+            graph.outbox.enqueue(CmdRevertMsg(id = entry.commandId, state = RevertState.KEPT, detail = detail, ts = graph.clock.isoNow()))
+            deleteRevertRow(entry.commandId)
+            updateLogStatus(entry.commandId, CommandStatus.KEPT, detail)
+            log.i(TAG, "Armed revert of ${entry.undoName} ${entry.commandId} superseded by $name $byId")
+        }
+        if (superseded.isNotEmpty()) graph.sync.kick()
+        return superseded
+    }
+
+    private suspend fun awaitRestored() {
+        if (restored.isCompleted) return
+        if (withTimeoutOrNull(RESTORE_WAIT_MS) { restored.await() } == null) {
+            log.w(TAG, "Armed reverts not restored after ${RESTORE_WAIT_MS / 1000} s; continuing")
+        }
     }
 
     /** The action that restores the state before [parsed], read from the phone before applying. */
@@ -587,16 +704,17 @@ class CommandExecutorImpl(private val graph: AgentGraph) : CommandExecutor {
         }
     }
 
-    private suspend fun commitRevert(prepared: PreparedRevert): String {
-        val appliedAt = graph.clock.serverNow()
-        val deadline = appliedAt + prepared.afterS * 1000L
+    /** Returns the Server-time ISO deadline for `cmd_result.revert_deadline`. */
+    private suspend fun commitRevert(prepared: PreparedRevert): String = revertMutex.withLock {
+        val windowMs = prepared.afterS * 1000L
+        val appliedAt = graph.clock.systemNowMs()
         try {
             revertDao.upsert(
                 ArmedRevertEntity(
                     commandId = prepared.commandId,
                     undoName = prepared.undoName,
                     undoArgsJson = prepared.undoArgs.toString(),
-                    deadlineMs = deadline,
+                    deadlineMs = appliedAt + windowMs,
                     confirmMode = prepared.mode.wire,
                     appliedAtMs = appliedAt,
                 ),
@@ -614,10 +732,10 @@ class CommandExecutorImpl(private val graph: AgentGraph) : CommandExecutor {
                 undoArgs = prepared.undoArgs,
                 mode = prepared.mode,
                 appliedAtMs = now,
-                deadlineMs = now + prepared.afterS * 1000L,
+                deadlineMs = now + windowMs,
             ),
         )
-        return Clock.formatIso(deadline)
+        Clock.formatIso(graph.clock.serverNow() + windowMs)
     }
 
     /** The command failed: put the previous state back to be safe and drop the persisted revert. */
@@ -625,7 +743,10 @@ class CommandExecutorImpl(private val graph: AgentGraph) : CommandExecutor {
         log.w(TAG, "${prepared.undoName} ${prepared.commandId} failed; restoring the previous state to be safe")
         val undo = runUndo(prepared.undoName, prepared.undoArgs)
         if (!undo.ok) log.w(TAG, "Restore after a failed ${prepared.undoName} also failed: ${undo.error}")
-        deleteRevertRow(prepared.commandId)
+        revertMutex.withLock {
+            reverts.disarm(prepared.commandId)
+            deleteRevertRow(prepared.commandId)
+        }
     }
 
     private suspend fun revertLoop() {
@@ -647,53 +768,67 @@ class CommandExecutorImpl(private val graph: AgentGraph) : CommandExecutor {
         }
     }
 
-    private suspend fun restoreArmedReverts() {
+    /**
+     * Puts the persisted reverts back into the tracker (quick: no undo runs here). One whose deadline
+     * passed while the Agent was not running is armed as due, so the revert loop undoes it at once.
+     */
+    private suspend fun restoreArmedReverts() = revertMutex.withLock {
         val rows = revertDao.all()
-        if (rows.isEmpty()) return
-        val nowServer = graph.clock.serverNow()
+        if (rows.isEmpty()) return@withLock
+        val nowWall = graph.clock.systemNowMs()
         val nowElapsed = graph.clock.elapsedMs()
         for (row in rows) {
-            if (reverts.isArmed(row.commandId)) continue
-            val entry = ArmedRevert(
-                commandId = row.commandId,
-                undoName = row.undoName,
-                undoArgs = parseArgs(row.undoArgsJson),
-                mode = RevertConfirm.fromWire(row.confirmMode) ?: RevertConfirm.AGENT_LINK,
-                appliedAtMs = nowElapsed - (nowServer - row.appliedAtMs).coerceAtLeast(0),
-                deadlineMs = nowElapsed + (row.deadlineMs - nowServer),
+            // Armed already (earlier start of this process), being resolved, or a command running now.
+            if (reverts.isArmed(row.commandId) || row.commandId in resolving || row.commandId in inFlight) continue
+            val entry = RevertRestore.restore(
+                row,
+                parseArgs(row.undoArgsJson),
+                RevertConfirm.fromWire(row.confirmMode) ?: RevertConfirm.AGENT_LINK,
+                nowWall,
+                nowElapsed,
             )
-            if (row.deadlineMs <= nowServer) {
-                revertNow(entry, "the deadline passed while the Agent was not running")
+            reverts.arm(entry)
+            if (entry.overdueAtStart) {
+                log.w(TAG, "Armed revert of ${row.commandId} (${row.undoName}): the deadline passed while the Agent was not running")
             } else {
-                reverts.arm(entry)
-                log.i(TAG, "Resumed armed revert of ${row.commandId} (${row.undoName}), ${(row.deadlineMs - nowServer) / 1000} s left")
+                log.i(TAG, "Resumed armed revert of ${row.commandId} (${row.undoName}), ${(entry.deadlineMs - nowElapsed) / 1000} s left")
             }
         }
     }
 
     private suspend fun revertNow(entry: ArmedRevert, detail: String) {
-        val undo = runUndo(entry.undoName, entry.undoArgs)
-        val fullDetail = if (undo.ok) detail else "$detail; undo failed: ${undo.error}"
-        graph.outbox.enqueue(
-            CmdRevertMsg(id = entry.commandId, state = RevertState.REVERTED, detail = fullDetail.take(MAX_ERROR_CHARS), ts = graph.clock.isoNow()),
-        )
-        graph.events.emit(
-            EventKind.REVERT, Severity.WARNING, "Auto-revert: ${label(entry.undoName)} change undone ($detail)",
-            jsonObjectOf("command_id" to entry.commandId, "name" to entry.undoName, "ok" to undo.ok, "undo" to entry.undoArgs),
-        )
-        deleteRevertRow(entry.commandId)
-        updateLogStatus(entry.commandId, CommandStatus.REVERTED, fullDetail)
-        graph.sync.kick()
-        log.w(TAG, "Reverted ${entry.undoName} ${entry.commandId}: $fullDetail")
+        resolving += entry.commandId
+        try {
+            val undo = runUndo(entry.undoName, entry.undoArgs)
+            val fullDetail = if (undo.ok) detail else "$detail; undo failed: ${undo.error}"
+            graph.outbox.enqueue(
+                CmdRevertMsg(id = entry.commandId, state = RevertState.REVERTED, detail = fullDetail.take(MAX_ERROR_CHARS), ts = graph.clock.isoNow()),
+            )
+            graph.events.emit(
+                EventKind.REVERT, Severity.WARNING, "Auto-revert: ${label(entry.undoName)} change undone ($detail)",
+                jsonObjectOf("command_id" to entry.commandId, "name" to entry.undoName, "ok" to undo.ok, "undo" to entry.undoArgs),
+            )
+            deleteRevertRow(entry.commandId)
+            updateLogStatus(entry.commandId, CommandStatus.REVERTED, fullDetail)
+            graph.sync.kick()
+            log.w(TAG, "Reverted ${entry.undoName} ${entry.commandId}: $fullDetail")
+        } finally {
+            resolving -= entry.commandId
+        }
     }
 
     private suspend fun keep(entry: ArmedRevert, detail: String) {
-        graph.outbox.enqueue(CmdRevertMsg(id = entry.commandId, state = RevertState.KEPT, detail = detail, ts = graph.clock.isoNow()))
-        deleteRevertRow(entry.commandId)
-        updateLogStatus(entry.commandId, CommandStatus.KEPT, detail)
-        if (entry.undoName == CommandNames.USB_TETHERING) TetherIntent.set(graph.prefs, true)
-        graph.sync.kick()
-        log.i(TAG, "Kept ${entry.undoName} ${entry.commandId}: $detail")
+        resolving += entry.commandId
+        try {
+            graph.outbox.enqueue(CmdRevertMsg(id = entry.commandId, state = RevertState.KEPT, detail = detail, ts = graph.clock.isoNow()))
+            deleteRevertRow(entry.commandId)
+            updateLogStatus(entry.commandId, CommandStatus.KEPT, detail)
+            if (entry.undoName == CommandNames.USB_TETHERING) TetherIntent.set(graph.prefs, true)
+            graph.sync.kick()
+            log.i(TAG, "Kept ${entry.undoName} ${entry.commandId}: $detail")
+        } finally {
+            resolving -= entry.commandId
+        }
     }
 
     private suspend fun runUndo(name: String, args: JsonObject): ActionResult {
@@ -723,6 +858,7 @@ class CommandExecutorImpl(private val graph: AgentGraph) : CommandExecutor {
     }
 
     private fun deadlineText(entry: ArmedRevert): String {
+        if (entry.overdueAtStart) return "the deadline passed while the Agent was not running"
         val seconds = (entry.deadlineMs - entry.appliedAtMs) / 1000
         return if (entry.mode == RevertConfirm.DASHBOARD) {
             "not kept from the Dashboard within $seconds s"
@@ -867,6 +1003,9 @@ class CommandExecutorImpl(private val graph: AgentGraph) : CommandExecutor {
         private const val MIN_REVERT_S = 15
         private const val MAX_REVERT_S = 86_400
         private const val UNDO_TIMEOUT_MS = 60_000L
+        private const val RESTORE_WAIT_MS = 30_000L
+        private const val RECENT_IDS = 256
+        private const val KEPT_FROM_DASHBOARD = "Kept from the Dashboard"
 
         private const val DEFAULT_TIMEOUT_MS = 3 * 60_000L
         private const val PROBE_TIMEOUT_MS = 5 * 60_000L

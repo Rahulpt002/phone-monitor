@@ -17,7 +17,7 @@ app/src/main/java/com/hotspotmonitor/agent/
 │   ├── AgentGraph.kt      service locator: every singleton + startAll()/stopAll()
 │   ├── Modules.kt         module interfaces (the contract below) and their data classes
 │   ├── AgentLog.kt        log: memory ring (1000 lines) + logcat "HSM/<tag>" + files/logs/agent.log (2 x 1 MB)
-│   ├── Clock.kt           serverNow()/isoNow() (offset-corrected), elapsedMs(), ISO helpers
+│   ├── Clock.kt           serverNow()/isoNow() (offset-corrected; last offset persisted, restored unsynced at start), elapsedMs(), ISO helpers
 │   ├── Ids.kt             e_/c_/s_/m_/p_ random ids
 │   ├── KeyValueStore.kt   SharedPreferences wrapper (+ MemoryStore for tests)
 │   ├── SettingsRepo.kt    StateFlow<Settings> + version, persisted, settings_applied event
@@ -256,9 +256,13 @@ The executor implements docs/protocol.md 3.5 in full: check order expiry (using
 `power_off` policy -> reboot limit -> args (`InvalidArgsException` from Args.kt ->
 `invalid_args`) -> busy (`graph.watchdog.state.value.stepRunning` or a conflicting command); then
 `cmd_ack`, execute, `cmd_result` (output truncated to `ProtocolLimits.MAX_OUTPUT_BYTES`), and
-auto-revert with `ArmedRevertEntity` (persist the undo before applying; `REVERT_SETTLE_S`; probe via
-`graph.sync.sendProbe()`; `cmd_revert` + `revert` event). Every handled command is written to
-`CommandLogEntity`. `refresh` -> `graph.sync.publishTelemetry(setOf(STATIC, SLOW, FAST))`;
+auto-revert with `ArmedRevertEntity` (persist the undo before applying, times in phone wall-clock ms
+so a restart restores the same deadline whatever the Server offset; `REVERT_SETTLE_S`; probe via
+`graph.sync.sendProbe()`; `cmd_revert` + `revert` event). A newer command on the same state (data,
+airplane, tether, network mode) supersedes an armed revert: `cmd_revert kept`, no undo, no event;
+if it arms a revert itself it inherits the earlier undo. Persisted reverts are restored first at
+start, and commands that arm a revert or `cmd_keep` wait for that. Every handled command is written
+to `CommandLogEntity`; a duplicate command id never runs again, its latest report is re-enqueued. `refresh` -> `graph.sync.publishTelemetry(setOf(STATIC, SLOW, FAST))`;
 `capability_probe` -> `probeCapabilities()` then `publishTelemetry(setOf(STATIC))`;
 `watchdog_simulate` -> `graph.watchdog.simulateInternetDown()`; finder commands -> `graph.finder`.
 A command name the Agent does not know is rejected `unsupported` (CmdMsg.name is a plain string).
@@ -341,7 +345,10 @@ The SyncClient owns: the WebSocket (`Authorization: Bearer <pairingState.token()
 rates, then `commands.onConnected()`, static + slow + fast telemetry, outbox drain), reconnect with
 backoff 2 s..60 s + jitter and on network-available, close codes 4001 (clear pairing / stop) and
 4002, the **telemetry tier scheduler** (fast every `rates.fast_s`, slow every `telemetry.slow_s`,
-always enqueued to the outbox so offline periods back-fill), the heartbeat every
+always enqueued to the outbox so offline periods back-fill; `heat.zones`, `system.top` and
+`traffic.per_if` only every 15 min or while a Dashboard is open, i.e. `rates.fast_s ==
+telemetry.fast_active_s`, and `radio.neighbours` only while a Dashboard is open: `TelemetryDetail`),
+the heartbeat every
 `telemetry.heartbeat_s`, the single outbox sender (live rows one by one, backlog in `batch` frames of
 `ProtocolLimits.MAX_BATCH_ITEMS`; `outbox.ackUpTo(ack.seq)`), dispatch of `cmd` / `cmd_keep` /
 `probe_ack` to `graph.commands`, `rates.mirror` to `graph.finder.setMirror`, and re-sending
@@ -541,6 +548,8 @@ the interface when the cast fails):
 | `ControlsImpl.restoreInterruptedCycles()` | executor start | re-enables data / leaves airplane mode after a cycle or radio rest cut short by a process death |
 | `ControlsImpl.currentUsbFunction()`, `currentNetworkMode()` | executor (auto-revert undo) | read the state to restore before a change |
 | `ChargeControllerImpl.clearManualOverride()` | control | a manual "charging on" ends when the battery is full |
+| `ChargeControllerImpl.lastSwitchWrite` | telemetry | the Agent's last charge-switch write, so a plug change it caused (switches that cut USB input) is not reported as `power_lost` |
+| `ChargeMemory` | control, watchdog | persisted manual override, heat stop and limit band; the watchdog seeds its heat rule from the heat stop |
 | `RadioActivity` | control, watchdog | process-wide gate: one radio/power action at a time (`busy`) |
 | `TetherIntent` | executor, watchdog | the user's "tethering off" wish; the watchdog does not undo it until USB is reconnected |
 | `FinderEngineImpl.ui`, `setScreenOpen`, `setMuted`, `stopWalk`, `cancelTest`, `launchSpotTest`, `launchSpeedTest`, `photoCaptureFile`, `attachPhoto`, `photoFile`, `FILE_PROVIDER_AUTHORITY` | ui/FinderScreen | local-only Finder UI (mute, photos, progress, cancel) |
@@ -552,11 +561,12 @@ the interface when the cast fails):
 | Prefix | Keys |
 |--------|------|
 | `settings.` | `json`, `version`, `local_edits` (SettingsRepo) |
+| `core.` | `clock_offset_ms` (Clock: last Server offset, restored unsynced at start) |
 | `pairing.` | `server_url`, `ws_url`, `device_id`, `paired_at`; the token is in SecureStore |
 | `root_setup.` | `done_version` |
 | `telemetry.` | `last_cell`, `boot_id`, `traffic_acc`, `ref.gravity`, `ref.lat`, `ref.lon`, `ref.acc`, `ref.moved_alerted`, `ref.baseline_spot` |
-| `control.` | `capabilities`, `pending_reboot_id`, `pending_reboot_at`, `tether_user_off`, `hotspot_ssid`, `hotspot_password` (SecureStore), `network_mode`, `restore_mobile_data`, `restore_airplane_off`, `charge_manual` |
-| `watchdog.` | `weekly_reboot_last` |
+| `control.` | `capabilities`, `pending_reboot_id`, `pending_reboot_at`, `tether_user_off`, `hotspot_ssid`, `hotspot_password` (SecureStore), `network_mode`, `restore_mobile_data`, `restore_airplane_off`, `charge_manual`, `charge_heat`, `charge_limit_stop` |
+| `watchdog.` | `weekly_reboot_last`, `heat_level`, `last_usb_function` |
 | `finder.` | `headless` (default true), `muted` |
 | `service.` | `user_stopped` |
 | `ui.` | `setup_done`, `keep_screen_on` |

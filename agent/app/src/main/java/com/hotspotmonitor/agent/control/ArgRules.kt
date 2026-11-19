@@ -12,7 +12,8 @@ internal object ArgRules {
     val OFF_SECONDS: IntRange = 1..600
     val BRIGHTNESS: IntRange = 0..255
     val CHARGE_LIMIT: IntRange = 20..100
-    val SHELL_TIMEOUT_S: IntRange = 1..300
+    /** Same range as the Server, the Dashboard and the simulator (shell console: 1..600 s). */
+    val SHELL_TIMEOUT_S: IntRange = 1..600
     const val SHELL_TIMEOUT_DEFAULT_S = 30
     const val SHELL_MAX_CHARS = 8_192
     val SIMULATE_S: IntRange = 10..86_400

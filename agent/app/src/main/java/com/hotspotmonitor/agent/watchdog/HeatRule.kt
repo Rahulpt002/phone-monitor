@@ -22,12 +22,16 @@ internal sealed class HeatSignal {
  *   min(temp_resume_c, temp_warn_c - [WARN_HYSTERESIS_C]), so a reading hovering at the warning
  *   threshold does not produce an event every few seconds,
  * - at temp_radio_rest_c the radio rests, when [evaluate]'s caller allows it.
+ *
+ * The state is restored across Agent restarts ([heatStop] from the charge controller's persisted heat
+ * stop, [level] from the watchdog's prefs), so a restart with the battery between temp_resume_c and
+ * temp_stop_charge_c neither resumes charging nor repeats the alert events.
  */
-internal class HeatRule {
-    var level: HeatLevel = HeatLevel.NORMAL
+internal class HeatRule(heatStop: Boolean = false, level: HeatLevel = if (heatStop) HeatLevel.CRITICAL else HeatLevel.NORMAL) {
+    var level: HeatLevel = level
         private set
 
-    var heatStop: Boolean = false
+    var heatStop: Boolean = heatStop
         private set
 
     fun evaluate(tempC: Double, s: WatchdogSettings, canRestRadio: Boolean): List<HeatSignal> {

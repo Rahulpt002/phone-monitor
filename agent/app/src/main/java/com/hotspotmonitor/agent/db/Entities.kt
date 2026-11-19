@@ -31,11 +31,11 @@ data class ArmedRevertEntity(
     @ColumnInfo(name = "undo_name") val undoName: String,
     /** JSON object of the undo action's args, e.g. {"enabled":true}. */
     @ColumnInfo(name = "undo_args_json") val undoArgsJson: String,
-    /** Epoch ms (Clock.serverNow) after which the undo runs unless confirmed. */
+    /** Phone wall-clock epoch ms (Clock.systemNowMs, see RevertRestore) after which the undo runs unless confirmed. */
     @ColumnInfo(name = "deadline_ms") val deadlineMs: Long,
     /** RevertConfirm wire value: "agent_link" or "dashboard". */
     @ColumnInfo(name = "confirm_mode") val confirmMode: String,
-    /** Epoch ms (Clock.serverNow) when the change was applied. */
+    /** Phone wall-clock epoch ms (Clock.systemNowMs) when the change was applied. */
     @ColumnInfo(name = "applied_at_ms") val appliedAtMs: Long,
 )
 

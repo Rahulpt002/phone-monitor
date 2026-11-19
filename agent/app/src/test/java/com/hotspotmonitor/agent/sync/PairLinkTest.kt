@@ -54,10 +54,56 @@ class PairLinkTest {
         assertEquals("hsm://pair?server=https%3A%2F%2Fhsm.onrender.com&code=ABCD2345", link)
         assertEquals(PairLink("https://hsm.onrender.com", "ABCD2345"), PairLink.parse(link))
 
+        // docs/protocol.md 2 / shared PairCodeResponse.adb_command: the adb-only activity-alias.
         val adb = PairingUrls.adbCommand(link)
-        assertEquals("adb shell \"am start -a android.intent.action.VIEW -d '$link' --ez auto true\"", adb)
+        assertEquals(
+            "adb shell \"am start -n com.hotspotmonitor.agent/.ui.AdbPair -a android.intent.action.VIEW -d '$link' --ez auto true\"",
+            adb,
+        )
         assertTrue(PairingUrls.adbCommand(link, replace = true).endsWith("--ez auto true --ez replace true\""))
         assertFalse(PairingUrls.adbCommand(link, auto = false).contains("--ez"))
+    }
+
+    @Test
+    fun autoAndReplaceCountOnlyThroughTheAdbEntry() {
+        val adb = PairLaunch.ADB_ENTRY
+        val exported = "com.hotspotmonitor.agent.ui.PairActivity"
+        // Any app or web page (intent: URL with B.auto=true;B.replace=true) reaches only PairActivity.
+        assertEquals(PairLaunch.TAP_AUTO_IGNORED, PairLaunch.decide(exported, auto = true, replace = true, paired = true))
+        assertEquals(PairLaunch.TAP_AUTO_IGNORED, PairLaunch.decide(exported, auto = true, replace = false, paired = false))
+        assertEquals(PairLaunch.TAP_AUTO_IGNORED, PairLaunch.decide(null, auto = true, replace = true, paired = false))
+        assertEquals(PairLaunch.TAP, PairLaunch.decide(exported, auto = false, replace = true, paired = true))
+        // adb (shell uid) through the DUMP-guarded alias.
+        assertEquals(PairLaunch.AUTO, PairLaunch.decide(adb, auto = true, replace = false, paired = false))
+        assertEquals(PairLaunch.TAP_ALREADY_PAIRED, PairLaunch.decide(adb, auto = true, replace = false, paired = true))
+        assertEquals(PairLaunch.AUTO, PairLaunch.decide(adb, auto = true, replace = true, paired = true))
+        assertEquals(PairLaunch.TAP, PairLaunch.decide(adb, auto = false, replace = true, paired = true))
+    }
+
+    @Test
+    fun tryAgainReplacesAPairingOnlyForTheLinkThatWasApproved() {
+        val a = PairLink("https://a.example.com", "AAAA-1111")
+        val b = PairLink("https://b.example.com", "BBBB-2222")
+        // Not paired: the tap on Try again is the approval.
+        assertFalse(PairLaunch.retryNeedsConfirm(b, approved = a, paired = false))
+        assertFalse(PairLaunch.retryNeedsConfirm(b, approved = null, paired = false))
+        // Paired: retrying the link that was confirmed (or started through adb) needs nothing more.
+        assertFalse(PairLaunch.retryNeedsConfirm(a, approved = a, paired = true))
+        // A link delivered by onNewIntent while A was running was never confirmed: ask again.
+        assertTrue(PairLaunch.retryNeedsConfirm(b, approved = a, paired = true))
+        assertTrue(PairLaunch.retryNeedsConfirm(b, approved = null, paired = true))
+    }
+
+    @Test
+    fun adbEntryIsTheManifestAliasGuardedByDump() {
+        val manifest = java.io.File(System.getProperty("user.dir"), "src/main/AndroidManifest.xml").readText()
+        val alias = Regex("""<activity-alias[^>]*android:name="\.ui\.AdbPair"[^>]*/>""", RegexOption.DOT_MATCHES_ALL)
+            .find(manifest)?.value
+        assertTrue("activity-alias .ui.AdbPair missing", alias != null)
+        assertTrue(alias!!.contains("android:permission=\"android.permission.DUMP\""))
+        assertTrue(alias.contains("android:targetActivity=\".ui.PairActivity\""))
+        assertFalse("reachable by explicit component only", alias.contains("intent-filter"))
+        assertEquals("com.hotspotmonitor.agent" + ".ui.AdbPair", PairLaunch.ADB_ENTRY)
     }
 
     @Test

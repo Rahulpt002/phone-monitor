@@ -299,3 +299,63 @@ internal fun parsePublicIp(body: String?): String? {
     if (text.contains(':') && text.all { it.isDigit() || it.lowercaseChar() in 'a'..'f' || it == ':' || it == '.' }) return text.lowercase()
     return null
 }
+
+/** How an unprivileged `ping` run ended, from its (merged) output. */
+internal enum class PingOutcome {
+    /** The statistics block was printed. */
+    RAN,
+
+    /** ping is missing, or ICMP sockets are not allowed for apps: the root shell can do it. */
+    NOT_PERMITTED,
+
+    /** The network is down or the name does not resolve: the root shell would fail the same way. */
+    NETWORK,
+
+    /** Something else (no output, timeout). */
+    UNKNOWN,
+}
+
+private val PING_NOT_PERMITTED = Regex("""(?i)operation not permitted|permission denied|socket:|icmp open socket""")
+private val PING_NETWORK = Regex(
+    """(?i)network is unreachable|unknown host|name or service not known|no address associated|temporary failure in name resolution|bad address|host is unreachable|no route to host""",
+)
+
+/** Classifies unprivileged ping output; [started] is false when the process could not start at all. */
+internal fun classifyPing(output: String?, started: Boolean): PingOutcome {
+    if (!started) return PingOutcome.NOT_PERMITTED
+    val stats = parsePing(output)
+    if (stats != null && stats.ran) return PingOutcome.RAN
+    val text = output.orEmpty()
+    return when {
+        PING_NETWORK.containsMatchIn(text) -> PingOutcome.NETWORK
+        PING_NOT_PERMITTED.containsMatchIn(text) -> PingOutcome.NOT_PERMITTED
+        else -> PingOutcome.UNKNOWN
+    }
+}
+
+/**
+ * Unprivileged ping first; the shared root shell only when ping itself cannot run for the app.
+ * An outage ('Network is unreachable', unknown host) never switches to root: every internet check
+ * would otherwise run through the single serialized root shell for the rest of the process. An
+ * unexplained failure switches only after [unknownLimit] in a row.
+ */
+internal class PingMode(private val unknownLimit: Int = 3) {
+    enum class Next { NO_READING, ROOT }
+
+    @Volatile
+    var useRoot: Boolean = false
+        private set
+
+    private var unknownInRow = 0
+
+    /** Records one unprivileged run; for anything but [PingOutcome.RAN] says what to do now. */
+    @Synchronized
+    fun onUnprivilegedResult(outcome: PingOutcome): Next {
+        when (outcome) {
+            PingOutcome.RAN, PingOutcome.NETWORK -> unknownInRow = 0
+            PingOutcome.NOT_PERMITTED -> useRoot = true
+            PingOutcome.UNKNOWN -> if (++unknownInRow >= unknownLimit) useRoot = true
+        }
+        return if (useRoot) Next.ROOT else Next.NO_READING
+    }
+}

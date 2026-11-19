@@ -34,6 +34,7 @@ Do not paste the full IMEI, serial number or cell IDs into this file: it is comm
 | Bootloader | The unlock option exists and the bootloader unlocks | Yes | | `info`: |
 | Root | Works and survives a reboot | Yes | | `root --reboot`: |
 | Automatic power-on | Phone boots by itself from fully off when power is connected | Yes | | method: ; `autoboot --test`: ; by hand: |
+| Root after cold boot | `su` still works after a start from fully off (power cut, then automatic power-on), not only after a reboot | Yes | | `root --cold-boot` or `autoboot --test`: ; root manager: |
 | Tethering after reboot | USB tethering comes up with no touch | Yes | | `usb --reboot-test`: interface , IP |
 | Power budget | 24 hours of tethering under load on the real port and cable; battery does not trend down | Yes | | hours: ; start % → end %: ; trend %/h: ; avg net mA: |
 | Charge control | Charging can be stopped and started from the root shell | Yes | | path: ; off/on: ; mode (idle / input suspended): |

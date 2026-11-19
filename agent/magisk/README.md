@@ -47,7 +47,7 @@ Or install the zip from the Magisk / KernelSU app (Modules, Install from storage
 | `uninstall.sh` | removes the log and flag files |
 | `hsm-keepalive.conf.example` | optional settings, copied to `/data/adb/hsm-keepalive.conf` |
 | `META-INF/...` | standard Magisk installer stub |
-| `extras/hsm-adb-vpn.sh` | optional, not in the zip: ADB over TCP reachable only through Tailscale |
+| `extras/hsm-adb-vpn.sh` | optional, not in the zip: ADB over TCP reachable only through Tailscale; fails closed (no TCP adb unless the IPv4 and IPv6 rules verify) |
 
 ## Operating it
 

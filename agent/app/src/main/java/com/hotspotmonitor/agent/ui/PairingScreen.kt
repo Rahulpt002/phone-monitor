@@ -117,8 +117,9 @@ fun PairingScreen(graph: AgentGraph) {
         SectionCard("Headless pairing (dead screen)") {
             HintText(
                 "The Dashboard shows a QR code with a link like the one below; any QR scanner opens it in this app, " +
-                    "which asks for one tap on Pair. With a broken screen, run the adb command instead: " +
-                    "'--ez auto true' pairs without a tap. Add '--ez replace true' to replace an existing pairing.",
+                    "which asks for a tap on Pair (and a second one to replace an existing pairing). With a broken " +
+                    "screen, run the adb command instead: it opens the adb-only entry .ui.AdbPair, where " +
+                    "'--ez auto true' pairs without a tap and '--ez replace true' replaces an existing pairing.",
             )
             val exampleServer = info?.serverUrl ?: server.takeIf { it.length > "https://".length } ?: "https://hsm.onrender.com"
             val exampleCode = PairingUrls.normalizeCode(code).ifEmpty { "ABCD2345" }

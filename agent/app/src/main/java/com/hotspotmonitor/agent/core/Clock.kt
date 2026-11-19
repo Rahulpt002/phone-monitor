@@ -12,7 +12,9 @@ import java.time.format.DateTimeFormatter
  * - [serverNow] / [isoNow]: best-known UTC time = phone clock + offset learned from the Server's
  *   `hello.server_time` / `probe_ack.server_time` (docs/protocol.md 3.1). Use these for every `ts`
  *   field and for command expiry, so a phone with a wrong clock still produces timestamps the Server
- *   treats as live. The offset is 0 until the first sync. The phone's clock itself is never changed.
+ *   treats as live. The phone's clock itself is never changed. Until the first sync of this process
+ *   the offset is the last one learned before ([attachStore]: persisted, restored at start with
+ *   [synced] = false), or 0 when there is none.
  * - [elapsedMs]: monotonic, includes deep sleep. Use it for every duration and timer; it does not
  *   jump when the offset changes.
  * - [systemNowMs]: the raw phone clock, for local-time decisions (weekly reboot, peak hour).
@@ -50,9 +52,43 @@ open class Clock {
     fun setServerOffset(offsetMs: Long) {
         serverOffsetMs = offsetMs
         synced = true
+        persist(offsetMs)
+    }
+
+    @Volatile
+    private var store: KeyValueStore? = null
+
+    @Volatile
+    private var persistedOffsetMs: Long? = null
+
+    /**
+     * Persists every later sync in [kv] and, while this process has not synced yet, restores the
+     * last persisted offset (marked unsynced until the next `hello`). Called once at Agent start,
+     * before anything compares or writes timestamps, so a restart while offline keeps producing
+     * Server-consistent `ts` values instead of the raw phone clock.
+     */
+    fun attachStore(kv: KeyValueStore) {
+        store = kv
+        val saved = if (kv.contains(KEY_OFFSET)) kv.getLong(KEY_OFFSET, 0) else null
+        persistedOffsetMs = saved
+        if (!synced && saved != null) serverOffsetMs = saved
+    }
+
+    /** Writes [offsetMs] when it moved by more than [PERSIST_STEP_MS] (prefs writes go to disk). */
+    private fun persist(offsetMs: Long) {
+        val kv = store ?: return
+        val last = persistedOffsetMs
+        if (last != null && kotlin.math.abs(last - offsetMs) <= PERSIST_STEP_MS) return
+        persistedOffsetMs = offsetMs
+        runCatching { kv.putLong(KEY_OFFSET, offsetMs) }
     }
 
     companion object {
+        const val KEY_OFFSET = "core.clock_offset_ms"
+
+        /** Offsets that differ by this much or less are not written again. */
+        const val PERSIST_STEP_MS = 1_000L
+
         private val ISO_MILLIS: DateTimeFormatter =
             DateTimeFormatter.ofPattern("yyyy-MM-dd'T'HH:mm:ss.SSS'Z'").withZone(ZoneOffset.UTC)
 

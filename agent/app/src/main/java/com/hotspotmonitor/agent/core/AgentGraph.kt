@@ -149,6 +149,9 @@ class AgentGraph(context: Context) {
         serviceScope = scope
         startedAtElapsedMs = clock.elapsedMs()
         log.i(TAG, "Starting Agent $agentVersion ($reason) on ${Build.MANUFACTURER} ${Build.MODEL}, SDK ${Build.VERSION.SDK_INT}")
+        // The last Server clock offset (unsynced until hello), before any module writes a timestamp.
+        runCatching { clock.attachStore(prefs) }.onFailure { log.w(TAG, "Could not restore the clock offset", it) }
+        if (!clock.synced && clock.serverOffsetMs != 0L) log.i(TAG, "Restored clock offset ${clock.serverOffsetMs} ms (unsynced until hello)")
 
         scope.launch(Dispatchers.IO) {
             runCatching { rootSetup.ensure() }.onFailure { log.e(TAG, "Root setup failed", it) }

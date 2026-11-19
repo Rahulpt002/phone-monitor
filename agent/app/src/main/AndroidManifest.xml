@@ -76,7 +76,8 @@
             </intent-filter>
         </activity>
 
-        <!-- hsm://pair?server=<urlencoded base url>&code=<code> (QR code or adb am start) -->
+        <!-- hsm://pair?server=<urlencoded base url>&code=<code> from a QR code, another app or a
+             web page: always needs a tap on Pair (and a second one to replace a pairing). -->
         <activity
             android:name=".ui.PairActivity"
             android:exported="true"
@@ -89,6 +90,17 @@
                 <data android:scheme="hsm" android:host="pair" />
             </intent-filter>
         </activity>
+
+        <!-- Headless pairing (dead screen), adb only: android.permission.DUMP is held by the adb
+             shell uid (and root), not by apps, so no app or web page can start this entry. Only it
+             honours the auto / replace boolean extras (the adb_command of POST /api/pair/codes:
+             am start -n com.hotspotmonitor.agent/.ui.AdbPair with the deep link and auto = true).
+             No intent filter: it is reachable by explicit component name only. -->
+        <activity-alias
+            android:name=".ui.AdbPair"
+            android:exported="true"
+            android:permission="android.permission.DUMP"
+            android:targetActivity=".ui.PairActivity" />
 
         <service
             android:name=".service.AgentService"

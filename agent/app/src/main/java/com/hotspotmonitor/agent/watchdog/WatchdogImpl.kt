@@ -1,5 +1,6 @@
 package com.hotspotmonitor.agent.watchdog
 
+import com.hotspotmonitor.agent.control.ChargeMemory
 import com.hotspotmonitor.agent.control.ControlsImpl
 import com.hotspotmonitor.agent.control.RadioActivity
 import com.hotspotmonitor.agent.control.TetherIntent
@@ -33,7 +34,9 @@ import java.util.Locale
 
 /**
  * Local recovery rules of plan 6.5, evaluated every [TICK_MS] on the service scope with thresholds
- * re-read from settings.watchdog on every tick:
+ * re-read from settings.watchdog on every tick. Recovery steps that take long (a ladder step, the
+ * tether fix, the weekly reboot) run in their own coroutine ([StepRunner]), so the heat and charge
+ * rules keep running every tick meanwhile; the internet, tether and weekly rules wait for the step:
  *
  * - internet ladder (data cycle -> airplane cycle -> reboot within the limit), driven by the
  *   telemetry internet check, paused while a user command has an armed auto-revert, while the
@@ -52,7 +55,8 @@ class WatchdogImpl(private val graph: AgentGraph) : Watchdog {
 
     // Rule state; touched only by the tick coroutine unless marked @Volatile.
     private val ladder = InternetLadder()
-    private val heat = HeatRule()
+    private val heat: HeatRule by lazy { restoreHeatRule() }
+    private val steps = StepRunner { name, e -> graph.log.e(TAG, "Recovery step '$name' failed", e) }
     private val weakPower = WeakPowerDetector()
     private val tetherFix = TetherFixRule()
     private var downSinceServerMs: Long? = null
@@ -68,8 +72,15 @@ class WatchdogImpl(private val graph: AgentGraph) : Watchdog {
     @Volatile private var restRunning = false
     @Volatile private var scheduleRunning = false
 
+    /** USB function last seen with tethering up; the tether fix restores that one. */
+    @Volatile private var lastTetherFunction: String? = null
+
     override fun start(scope: CoroutineScope) {
         this.scope = scope
+        if (lastTetherFunction == null) {
+            lastTetherFunction = runCatching { graph.prefs.getString(KEY_LAST_USB_FUNCTION) }.getOrNull()
+                ?.takeIf { it == "rndis" || it == "ncm" }
+        }
         scope.launch {
             while (true) {
                 tick()
@@ -80,6 +91,7 @@ class WatchdogImpl(private val graph: AgentGraph) : Watchdog {
 
     override fun stop() {
         scope = null
+        steps.clear()
         radioRestJob = null
         ladderRunning = false
         tetherRunning = false
@@ -109,6 +121,8 @@ class WatchdogImpl(private val graph: AgentGraph) : Watchdog {
         rule("heat") { heatRule(s, now) }
         rule("charge limit") { graph.charge.applyLimit(s.chargeLimitPct, s.chargeResumeDropPct, graph.telemetry.power.value?.percent) }
         rule("power") { powerRule(s, now) }
+        // A recovery step runs beside the tick; the rules below continue once it has finished.
+        if (steps.active) return
         if (!s.enabled) {
             if (ladder.downSinceMs != null) {
                 ladder.reset()
@@ -163,23 +177,31 @@ class WatchdogImpl(private val graph: AgentGraph) : Watchdog {
             logSuppressed(now, "Internet down: ${step.action} postponed because $blocker")
             return
         }
-        if (!simulated) {
-            // Confirm with a fresh check: the telemetry reading may be a few seconds old.
-            val fresh = try {
-                graph.telemetry.checkInternetNow()
-            } catch (e: CancellationException) {
-                throw e
-            } catch (e: Exception) {
-                graph.log.w(TAG, "Internet re-check failed", e)
-                null
+        launchStep(step.action) {
+            if (!simulated) {
+                // Confirm with a fresh check: the telemetry reading may be a few seconds old.
+                val fresh = try {
+                    graph.telemetry.checkInternetNow()
+                } catch (e: CancellationException) {
+                    throw e
+                } catch (e: Exception) {
+                    graph.log.w(TAG, "Internet re-check failed", e)
+                    null
+                }
+                if (fresh?.online == true) {
+                    ladder.observe(graph.clock.elapsedMs(), true)?.let { emitRecovered(it) }
+                    publishLadder(now)
+                    return@launchStep
+                }
             }
-            if (fresh?.online == true) {
-                ladder.observe(graph.clock.elapsedMs(), true)?.let { emitRecovered(it) }
-                publishLadder(now)
-                return
-            }
+            runLadderStep(step, s, now)
         }
-        runLadderStep(step, s, now)
+    }
+
+    /** Runs a recovery step beside the tick (see [StepRunner]). */
+    private fun launchStep(name: String, block: suspend () -> Unit) {
+        val serviceScope = scope ?: return
+        steps.launch(serviceScope, name, block)
     }
 
     private suspend fun runLadderStep(step: LadderStep, s: WatchdogSettings, now: Long) {
@@ -279,6 +301,7 @@ class WatchdogImpl(private val graph: AgentGraph) : Watchdog {
             return
         }
         val tether = graph.telemetry.tether.value ?: return
+        rememberTetherFunction(TetherFunction.seen(tether.usbTetherOn, tether.usbFunction))
         val usb = tether.usbConnected ?: return
         val on = tether.usbTetherOn ?: return
         if (!usb && TetherIntent.userWantsOff(graph.prefs)) {
@@ -295,19 +318,36 @@ class WatchdogImpl(private val graph: AgentGraph) : Watchdog {
         if (!RadioActivity.tryAcquire(owner)) return
         tetherRunning = true
         publishRunning()
-        try {
-            val r = graph.controls.setUsbTethering(true, s.usbFunction)
-            tetherFix.onAttempt(graph.clock.elapsedMs(), s.tetherFixAfterS)
-            emitAction(
-                RULE_TETHER, CommandNames.USB_TETHERING, tetherFix.attempts, outcome(r),
-                if (r.ok) "USB connected but tethering was off: turned it back on (${s.usbFunction})"
-                else "USB connected but tethering is off; turning it on failed (${r.error})",
-            )
-        } finally {
+        // Null (never seen up): ControlsImpl picks the profile's usb_function, then the setting.
+        val function = lastTetherFunction
+        val started = scope?.let { serviceScope ->
+            steps.launch(serviceScope, "tether fix") {
+                try {
+                    val r = graph.controls.setUsbTethering(true, function)
+                    tetherFix.onAttempt(graph.clock.elapsedMs(), s.tetherFixAfterS)
+                    emitAction(
+                        RULE_TETHER, CommandNames.USB_TETHERING, tetherFix.attempts, outcome(r),
+                        if (r.ok) "USB connected but tethering was off: turned it back on (${r.output})"
+                        else "USB connected but tethering is off; turning it on failed (${r.error})",
+                    )
+                } finally {
+                    RadioActivity.release(owner)
+                    tetherRunning = false
+                    publishRunning()
+                }
+            }
+        } == true
+        if (!started) {
             RadioActivity.release(owner)
             tetherRunning = false
             publishRunning()
         }
+    }
+
+    private fun rememberTetherFunction(seen: String?) {
+        if (seen == null || seen == lastTetherFunction) return
+        lastTetherFunction = seen
+        runCatching { graph.prefs.putString(KEY_LAST_USB_FUNCTION, seen) }
     }
 
     // --- heat, charging and power ---------------------------------------------------------------
@@ -322,7 +362,10 @@ class WatchdogImpl(private val graph: AgentGraph) : Watchdog {
                     if (!r.ok) graph.log.w(TAG, "Heat stop: could not stop charging (${r.error})")
                 }
                 HeatSignal.ResumeCharging -> graph.charge.setCharging(true, StopReason.HEAT)
-                is HeatSignal.Level -> emitHeatLevel(signal, temp, s)
+                is HeatSignal.Level -> {
+                    runCatching { graph.prefs.putString(KEY_HEAT_LEVEL, signal.to.name) }
+                    emitHeatLevel(signal, temp, s)
+                }
                 HeatSignal.RestRadio -> startRadioRest(s, temp)
             }
         }
@@ -420,28 +463,45 @@ class WatchdogImpl(private val graph: AgentGraph) : Watchdog {
         if (!RadioActivity.tryAcquire(owner)) return
         scheduleRunning = true
         publishRunning()
-        try {
-            // Stored before rebooting, so the phone never reboots twice for the same week.
-            graph.prefs.putString(KEY_WEEKLY_LAST, key)
-            val allowed = graph.rebootLimiter.canReboot(graph.clock.systemNowMs())
-            val result = reboot(CommandSource.SCHEDULE, "weekly reboot") {
-                graph.events.emitAndStore(
-                    EventKind.WATCHDOG_ACTION, Severity.INFO, "Weekly reboot (${cfg.time})",
-                    actionData(RULE_WEEKLY, CommandNames.REBOOT, 1, OUTCOME_REBOOTING),
-                )
-            }
-            emitAction(
-                RULE_WEEKLY, CommandNames.REBOOT, 1, if (!allowed) OUTCOME_BLOCKED else OUTCOME_FAILED,
-                if (!allowed) "Weekly reboot skipped: reboot limit reached" else "Weekly reboot failed (${result.error})",
-            )
-        } finally {
+        val release = {
             RadioActivity.release(owner)
             scheduleRunning = false
             publishRunning()
         }
+        val started = scope?.let { serviceScope ->
+            steps.launch(serviceScope, "weekly reboot") {
+                try {
+                    // Stored before rebooting, so the phone never reboots twice for the same week.
+                    graph.prefs.putString(KEY_WEEKLY_LAST, key)
+                    val allowed = graph.rebootLimiter.canReboot(graph.clock.systemNowMs())
+                    val result = reboot(CommandSource.SCHEDULE, "weekly reboot") {
+                        graph.events.emitAndStore(
+                            EventKind.WATCHDOG_ACTION, Severity.INFO, "Weekly reboot (${cfg.time})",
+                            actionData(RULE_WEEKLY, CommandNames.REBOOT, 1, OUTCOME_REBOOTING),
+                        )
+                    }
+                    emitAction(
+                        RULE_WEEKLY, CommandNames.REBOOT, 1, if (!allowed) OUTCOME_BLOCKED else OUTCOME_FAILED,
+                        if (!allowed) "Weekly reboot skipped: reboot limit reached" else "Weekly reboot failed (${result.error})",
+                    )
+                } finally {
+                    release()
+                }
+            }
+        } == true
+        if (!started) release()
     }
 
     // --- helpers --------------------------------------------------------------------------------
+
+    /** Heat stop from the charge controller's persisted state, alert level from this rule's prefs. */
+    private fun restoreHeatRule(): HeatRule {
+        val stop = runCatching { ChargeMemory(graph.prefs).heatStop }.getOrDefault(false)
+        val level = runCatching { graph.prefs.getString(KEY_HEAT_LEVEL) }.getOrNull()
+            ?.let { name -> HeatLevel.entries.firstOrNull { it.name == name } }
+        if (stop || level != null) graph.log.i(TAG, "Heat state restored: heat stop $stop, level ${level ?: "-"}")
+        return if (level != null) HeatRule(heatStop = stop, level = level) else HeatRule(heatStop = stop)
+    }
 
     /** Why recovery actions must wait now, or null. */
     private suspend fun actionBlocker(): String? {
@@ -510,6 +570,8 @@ class WatchdogImpl(private val graph: AgentGraph) : Watchdog {
         private const val REBOOT_WAIT_MS = 60_000L
         private const val SUPPRESSED_LOG_EVERY_MS = 60_000L
         private const val KEY_WEEKLY_LAST = "watchdog.weekly_reboot_last"
+        private const val KEY_HEAT_LEVEL = "watchdog.heat_level"
+        private const val KEY_LAST_USB_FUNCTION = "watchdog.last_usb_function"
 
         private const val RULE_INTERNET = "internet"
         private const val RULE_TETHER = "tether"

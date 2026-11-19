@@ -105,9 +105,8 @@ internal class NetCollector(
             .build()
     }
 
-    /** Set once unprivileged ping proved unusable on this phone (ICMP sockets not allowed). */
-    @Volatile
-    private var pingNeedsRoot = false
+    /** Whether ping runs unprivileged or through the root shell on this phone. */
+    private val pingMode = PingMode()
 
     suspend fun check(settings: TelemetrySettings): CheckResult = coroutineScope {
         val http = async { httpProbeWithRetry(settings.probeUrl) }
@@ -156,13 +155,21 @@ internal class NetCollector(
             failures.fail("ping_host", "Refusing to ping '$host' (not a host name or address)")
             return null
         }
-        if (!pingNeedsRoot) {
+        if (!pingMode.useRoot) {
             val direct = runProcess(listOf("ping", "-c", "5", "-i", "0.2", "-W", "2", host), PING_TIMEOUT_MS)
             val stats = parsePing(direct?.out)
-            if (stats != null && stats.ran) return stats
-            // No statistics block: ping is missing or ICMP sockets are not allowed for apps.
-            pingNeedsRoot = true
-            failures.fail("ping_unprivileged", "Unprivileged ping does not work here (${direct?.out?.trim()?.take(120)}); using the root shell")
+            if (stats != null && stats.ran) {
+                pingMode.onUnprivilegedResult(PingOutcome.RAN)
+                return stats
+            }
+            when (pingMode.onUnprivilegedResult(classifyPing(direct?.out, started = direct != null))) {
+                // The network is down (or the host unknown): root would not help; no reading.
+                PingMode.Next.NO_READING -> return null
+                PingMode.Next.ROOT -> failures.fail(
+                    "ping_unprivileged",
+                    "Unprivileged ping does not work here (${direct?.out?.trim()?.take(120)}); using the root shell",
+                )
+            }
         }
         val root = shell()
         if (root.rooted.value == false) return null

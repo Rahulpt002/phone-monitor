@@ -5,7 +5,8 @@ import java.net.URLDecoder
 
 /**
  * A parsed pairing deep link `hsm://pair?server=<urlencoded base url>&code=<code>` (QR code from
- * the Dashboard, or `adb shell am start -a android.intent.action.VIEW -d '<link>'`).
+ * the Dashboard, or `adb shell "am start -n com.hotspotmonitor.agent/.ui.AdbPair -a
+ * android.intent.action.VIEW -d '<link>' --ez auto true"`).
  *
  * [server] is the decoded URL as given; PairingClient validates and normalises it.
  */
@@ -14,10 +15,13 @@ data class PairLink(val server: String, val code: String) {
         const val SCHEME = "hsm"
         const val HOST = "pair"
 
-        /** `am start ... --ez auto true`: pair at once, without the Pair button (dead screen). */
+        /**
+         * `am start -n .../.ui.AdbPair ... --ez auto true`: pair at once, without the Pair button
+         * (dead screen). Honoured only through the adb entry ([PairLaunch]).
+         */
         const val EXTRA_AUTO = "auto"
 
-        /** `--ez replace true`: let an automatic pairing replace an existing one. */
+        /** `--ez replace true`: let an automatic pairing replace an existing one (adb entry only). */
         const val EXTRA_REPLACE = "replace"
 
         /** Parses [link]; null when it is not a well-formed pairing link. */
@@ -62,5 +66,48 @@ data class PairLink(val server: String, val code: String) {
         } catch (e: IllegalArgumentException) {
             null
         }
+    }
+}
+
+/**
+ * How PairActivity treats one launch. The `auto` and `replace` extras count only when the launch
+ * came through the activity-alias [ADB_ENTRY], which is guarded by android.permission.DUMP: only the
+ * adb shell uid and root hold it, so no app, QR scanner or web page (intent: URL with B.auto=true)
+ * can pair or re-pair the phone without a tap on its screen.
+ */
+enum class PairLaunch {
+    /** Show the link and wait for a tap on Pair (plus a confirmation when it replaces a pairing). */
+    TAP,
+
+    /** The adb entry asked for `auto` but did not come through it: shown, and a tap is needed. */
+    TAP_AUTO_IGNORED,
+
+    /** adb entry with `auto`, but already paired and no `replace`: wait for a tap. */
+    TAP_ALREADY_PAIRED,
+
+    /** adb entry with `auto` (and `replace` when already paired): pair now. */
+    AUTO,
+    ;
+
+    companion object {
+        /** Class name of the activity-alias `.ui.AdbPair` (AndroidManifest.xml). */
+        const val ADB_ENTRY = "com.hotspotmonitor.agent.ui.AdbPair"
+
+        /** [componentClass] is the launch intent's component class (the alias name when started through it). */
+        fun decide(componentClass: String?, auto: Boolean, replace: Boolean, paired: Boolean): PairLaunch = when {
+            !auto -> TAP
+            componentClass != ADB_ENTRY -> TAP_AUTO_IGNORED
+            paired && !replace -> TAP_ALREADY_PAIRED
+            else -> AUTO
+        }
+
+        /**
+         * "Try again" after a failed pairing to [target]: true when it must first ask to confirm
+         * replacing the current pairing, because [target] is not the link [approved] as a
+         * replacement (the Replace confirmation, or the adb entry). A link delivered while a pairing
+         * was running, or one tapped while the phone was still unpaired, was never approved.
+         */
+        fun retryNeedsConfirm(target: PairLink, approved: PairLink?, paired: Boolean): Boolean =
+            paired && target != approved
     }
 }

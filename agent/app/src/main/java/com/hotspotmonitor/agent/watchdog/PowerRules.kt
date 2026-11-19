@@ -1,6 +1,11 @@
 package com.hotspotmonitor.agent.watchdog
 
+import com.hotspotmonitor.agent.protocol.UsbFunction
 import com.hotspotmonitor.agent.protocol.WeeklyReboot
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.launch
 import java.time.LocalDateTime
 import java.time.LocalTime
 import kotlin.math.roundToInt
@@ -112,6 +117,55 @@ internal class TetherFixRule {
 
     companion object {
         private const val MAX_BACKOFF_SHIFT = 5
+    }
+}
+
+/**
+ * The USB function the tether fix switches back on: the one last seen with tethering up (rndis or
+ * ncm), so a phone or host that needs NCM is never forced to RNDIS. Null when none was seen;
+ * ControlsImpl then uses the device profile's usb_function (with profile_override), then
+ * settings.watchdog.usb_function, the same precedence as every other caller.
+ */
+internal object TetherFunction {
+    fun seen(tetherOn: Boolean?, function: UsbFunction?): String? {
+        if (tetherOn != true) return null
+        return when (function) {
+            UsbFunction.RNDIS -> "rndis"
+            UsbFunction.NCM -> "ncm"
+            else -> null
+        }
+    }
+}
+
+/**
+ * Runs one recovery step (ladder step, tether fix, weekly reboot) at a time in its own coroutine,
+ * beside the watchdog tick: a data or airplane cycle (up to 600 s off) or a reboot that returned
+ * without rebooting (60 s wait) must not stop the heat stop, radio rest and charge limit, which the
+ * tick keeps evaluating every few seconds.
+ */
+internal class StepRunner(private val onError: (String, Throwable) -> Unit) {
+    @Volatile
+    private var job: Job? = null
+
+    val active: Boolean get() = job?.isActive == true
+
+    /** Starts [block] unless a step is running; false when it did not start. */
+    fun launch(scope: CoroutineScope, name: String, block: suspend () -> Unit): Boolean {
+        if (active) return false
+        job = scope.launch {
+            try {
+                block()
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                onError(name, e)
+            }
+        }
+        return true
+    }
+
+    fun clear() {
+        job = null
     }
 }
 

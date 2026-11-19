@@ -7,6 +7,8 @@ import android.content.IntentFilter
 import android.net.ConnectivityManager
 import android.net.Network
 import android.os.BatteryManager
+import com.hotspotmonitor.agent.control.ChargeControllerImpl
+import com.hotspotmonitor.agent.control.ChargeSwitchWrite
 import com.hotspotmonitor.agent.core.AgentGraph
 import com.hotspotmonitor.agent.core.Clock
 import com.hotspotmonitor.agent.core.FastGroups
@@ -65,7 +67,9 @@ import kotlinx.serialization.json.JsonObject
  * - slow groups: every telemetry.slow_s (shared with [collectSlow], so the work is not doubled).
  * - location: refreshed when older than 10 minutes.
  * Broadcasts (USB state, tethering, power) refresh their group immediately and emit
- * usb_* / tether_* / power_* events. Every collector fails soft: a field it cannot read is null.
+ * usb_* / tether_* / power_* events; a plug change caused by the Agent's own charge switch (paths that
+ * cut USB input) is not reported as a power loss ([PowerEventFilter]). Every collector fails soft: a
+ * field it cannot read is null.
  */
 class TelemetryHubImpl(private val graph: AgentGraph) : TelemetryHub {
     private val failures by lazy { FailureLog(graph.log, TAG) }
@@ -115,6 +119,7 @@ class TelemetryHubImpl(private val graph: AgentGraph) : TelemetryHub {
     private val cellChanges = ChangeDebouncer<CellRef>(CHANGE_READINGS) { a, b -> a.sameCellAs(b) }
     private val netTypeChanges = ChangeDebouncer<NetType>(CHANGE_READINGS)
     private val connectivity = ConnectivityTracker()
+    private val powerEvents = PowerEventFilter()
 
     @Volatile private var radioAtMs = NEVER
     @Volatile private var slowAtMs = NEVER
@@ -468,6 +473,7 @@ class TelemetryHubImpl(private val graph: AgentGraph) : TelemetryHub {
             val battery = powerCollector.batteryIntent()
             val charge = failures.soft("charge_state") { graph.charge.state.value }
             _power.value = powerCollector.collect(battery, graph.profiles.current, charge)
+            checkPendingPowerLoss(battery)
             if (zones == null || now() - zonesAtMs >= zonesMaxAgeMs) {
                 val read = heatCollector.readZones()
                 zones = ThermalMath.summarize(read, graph.profiles.current.thermal)
@@ -631,20 +637,51 @@ class TelemetryHubImpl(private val graph: AgentGraph) : TelemetryHub {
             val percent = battery?.let { b ->
                 PowerMath.percent(b.getIntExtra(BatteryManager.EXTRA_LEVEL, -1), b.getIntExtra(BatteryManager.EXTRA_SCALE, -1))
             }
+            val lastWrite = lastChargeSwitchWrite()
             if (connected) {
-                val plug = battery?.getIntExtra(BatteryManager.EXTRA_PLUGGED, -1)?.takeIf { it >= 0 }?.let { PowerMath.plug(it) }
-                graph.events.emit(
-                    EventKind.POWER_CONNECTED, Severity.INFO, "Power connected" + (percent?.let { " at $it%" } ?: ""),
-                    jsonObjectOf("percent" to percent, "plug" to plug).withoutNulls() as JsonObject,
-                )
+                if (powerEvents.onConnected(now(), lastWrite)) {
+                    val plug = battery?.getIntExtra(BatteryManager.EXTRA_PLUGGED, -1)?.takeIf { it >= 0 }?.let { PowerMath.plug(it) }
+                    graph.events.emit(
+                        EventKind.POWER_CONNECTED, Severity.INFO, "Power connected" + (percent?.let { " at $it%" } ?: ""),
+                        jsonObjectOf("percent" to percent, "plug" to plug).withoutNulls() as JsonObject,
+                    )
+                } else {
+                    graph.log.i(TAG, "Plug back after the Agent switched charging on (charge switch cuts USB input): no event")
+                }
+            } else if (powerEvents.onDisconnected(now(), lastWrite, _tether.value?.usbConnected)) {
+                emitPowerLost(percent, null)
             } else {
-                graph.events.emit(
-                    EventKind.POWER_LOST, Severity.WARNING, "USB power lost" + (percent?.let { " at $it%" } ?: ""),
-                    jsonObjectOf("percent" to percent).withoutNulls() as JsonObject,
-                )
+                graph.log.i(TAG, "Plug gone right after the Agent switched charging off (charge switch cuts USB input): not a power loss")
             }
             powerWake.trySend(Unit)
         }
+    }
+
+    private fun lastChargeSwitchWrite(): ChargeSwitchWrite? =
+        failures.soft("charge_switch_write") { (graph.charge as? ChargeControllerImpl)?.lastSwitchWrite }
+
+    /** A disconnect put down to the charge switch turned out to be a real loss ([PowerEventFilter.check]). */
+    private fun checkPendingPowerLoss(battery: Intent?) {
+        val plugged = battery?.getIntExtra(BatteryManager.EXTRA_PLUGGED, -1)?.takeIf { it >= 0 }?.let { it != 0 }
+        val lost = powerEvents.check(now(), lastChargeSwitchWrite(), plugged, _tether.value?.usbConnected) ?: return
+        val percent = battery?.let { b ->
+            PowerMath.percent(b.getIntExtra(BatteryManager.EXTRA_LEVEL, -1), b.getIntExtra(BatteryManager.EXTRA_SCALE, -1))
+        }
+        emitPowerLost(
+            percent,
+            when (lost) {
+                PowerEventFilter.Lost.USB_GONE -> "USB disconnected while charging was paused"
+                PowerEventFilter.Lost.NOT_BACK_AFTER_RESUME -> "no power after charging was switched back on"
+            },
+        )
+    }
+
+    private fun emitPowerLost(percent: Int?, detail: String?) {
+        graph.events.emit(
+            EventKind.POWER_LOST, Severity.WARNING,
+            "USB power lost" + (percent?.let { " at $it%" } ?: "") + (detail?.let { " ($it)" } ?: ""),
+            jsonObjectOf("percent" to percent, "detail" to detail).withoutNulls() as JsonObject,
+        )
     }
 
     private val stateReceiver = object : BroadcastReceiver() {
