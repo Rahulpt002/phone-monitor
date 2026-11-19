@@ -1,20 +1,30 @@
-import { useEffect, type ReactNode } from 'react';
+import { lazy, useEffect, type ComponentType, type ReactNode } from 'react';
 import { BrowserRouter, Navigate, Route, Routes, useLocation, useNavigate } from 'react-router-dom';
 import { AppShell } from './components/layout/AppShell';
 import { Toasts, UpdatePrompt } from './components/layout/Banners';
-import { AlertsScreen } from './screens/Alerts';
-import { ControlsScreen } from './screens/Controls';
-import { EnrollScreen } from './screens/Enroll';
-import { FinderScreen } from './screens/Finder';
 import { LoginScreen } from './screens/Login';
-import { MessagesScreen } from './screens/Messages';
-import { NetworkScreen } from './screens/Network';
 import { OverviewScreen } from './screens/Overview';
-import { PowerScreen } from './screens/Power';
-import { SettingsScreen } from './screens/Settings';
-import { SignalScreen } from './screens/Signal';
-import { SystemScreen } from './screens/System';
 import { useSession } from './store/session';
+
+/**
+ * Every screen except Login and Overview (the first paint) is its own chunk, so history charts
+ * (uPlot), Signal Finder, the admin screens, the root console and QR codes load on first use.
+ * The service worker precaches all chunks (vite.config.ts globPatterns), so they work offline.
+ * AppShell wraps the routes in Suspense and an error boundary (RouteBoundary.tsx).
+ */
+function lazyScreen<M>(load: () => Promise<M>, pick: (m: M) => ComponentType) {
+  return lazy(async () => ({ default: pick(await load()) }));
+}
+const SignalScreen = lazyScreen(() => import('./screens/Signal'), (m) => m.SignalScreen);
+const NetworkScreen = lazyScreen(() => import('./screens/Network'), (m) => m.NetworkScreen);
+const PowerScreen = lazyScreen(() => import('./screens/Power'), (m) => m.PowerScreen);
+const ControlsScreen = lazyScreen(() => import('./screens/Controls'), (m) => m.ControlsScreen);
+const SystemScreen = lazyScreen(() => import('./screens/System'), (m) => m.SystemScreen);
+const FinderScreen = lazyScreen(() => import('./screens/Finder'), (m) => m.FinderScreen);
+const MessagesScreen = lazyScreen(() => import('./screens/Messages'), (m) => m.MessagesScreen);
+const AlertsScreen = lazyScreen(() => import('./screens/Alerts'), (m) => m.AlertsScreen);
+const SettingsScreen = lazyScreen(() => import('./screens/Settings'), (m) => m.SettingsScreen);
+const EnrollScreen = lazyScreen(() => import('./screens/Enroll'), (m) => m.EnrollScreen);
 
 function RequireSession({ children }: { children: ReactNode }) {
   const phase = useSession((s) => s.phase);

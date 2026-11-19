@@ -13,7 +13,6 @@ import {
   diffSettings,
   getPath,
   parseIntList,
-  removesKeys,
   sameValue,
   setPath,
   validateSettings,
@@ -210,7 +209,8 @@ export function SettingsEditor({ focusSection }: { focusSection?: string | null 
   const server = useDeviceSettings();
   const isAdmin = useSession((s) => s.user?.role === 'admin');
   const totp = useSession((s) => s.totpEnrollmentRequired);
-  const readOnly = !isAdmin || totp;
+  // Settings are stored per phone, so there is nothing to save to until one is paired.
+  const readOnly = !isAdmin || totp || !deviceId;
 
   const [base, setBase] = useState<Settings>(server.settings);
   const [baseVersion, setBaseVersion] = useState<number | null>(server.version);
@@ -273,10 +273,7 @@ export function SettingsEditor({ focusSection }: { focusSection?: string | null 
     setSaving(true);
     setSaveError(null);
     try {
-      // A deep merge cannot delete keys inside the override, so clear it first when keys were removed.
-      if ('profile_override' in patch && removesKeys(base.profile_override, effective.profile_override)) {
-        await api.putSettings(deviceId, { profile_override: null });
-      }
+      // One PUT: the Server replaces profile_override as a whole, and the patch carries it complete.
       const res = await api.putSettings(deviceId, patch);
       useData.getState().setSettings(res.device_id ?? deviceId, res.settings, res.version);
       resetTo(res.settings, res.version);
@@ -293,7 +290,13 @@ export function SettingsEditor({ focusSection }: { focusSection?: string | null 
     <div className="space-y-4 pb-24">
       {!isAdmin ? <Notice tone="info">Viewer accounts can read the settings but not change them.</Notice> : null}
       {isAdmin && totp ? <Notice tone="warn">Set up two-factor authentication before changing settings.</Notice> : null}
-      {!server.loaded ? <Notice tone="info">Showing the default values until the phone’s settings load.</Notice> : null}
+      {!deviceId ? (
+        <Notice tone="info" title="No phone is paired yet">
+          Settings are stored per phone. These are the defaults a newly paired phone starts with; you can change them once it is paired.
+        </Notice>
+      ) : !server.loaded ? (
+        <Notice tone="info">Showing the default values until the phone’s settings load.</Notice>
+      ) : null}
       {remoteChanged && changes ? (
         <Notice
           tone="warn"

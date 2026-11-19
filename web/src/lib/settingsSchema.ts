@@ -280,33 +280,51 @@ export function validateSettings(s: Settings): ValidationResult {
 
 // --- patches ----------------------------------------------------------------------------------
 
+const isPlainObject = (v: unknown): v is Record<string, unknown> => typeof v === 'object' && v !== null && !Array.isArray(v);
+
 /**
- * Minimal deep patch turning `base` into `next` for PUT /settings (deep-merged by the Server).
- * Arrays and scalars are replaced whole; returns null when nothing changed.
+ * Top-level settings the Server replaces as a whole on PUT instead of deep-merging (shared
+ * mergeSettings). A patch must carry their complete new value, which also lets one PUT remove keys.
  */
-export function diffSettings(base: unknown, next: unknown): Record<string, unknown> | null {
-  const isPlain = (v: unknown): v is Record<string, unknown> => typeof v === 'object' && v !== null && !Array.isArray(v);
-  if (!isPlain(base) || !isPlain(next)) return sameValue(base, next) ? null : (next as Record<string, unknown>);
+export const REPLACED_WHOLE: ReadonlySet<string> = new Set(['profile_override']);
+
+function diffObjects(base: Record<string, unknown>, next: Record<string, unknown>, top: boolean): Record<string, unknown> | null {
   const out: Record<string, unknown> = {};
   for (const [k, v] of Object.entries(next)) {
     const b = base[k];
-    if (isPlain(b) && isPlain(v)) {
-      const sub = diffSettings(b, v);
+    const whole = top && REPLACED_WHOLE.has(k);
+    if (!whole && isPlainObject(b) && isPlainObject(v)) {
+      const sub = diffObjects(b, v, false);
       if (sub) out[k] = sub;
     } else if (!sameValue(b, v)) {
-      out[k] = v;
+      out[k] = whole ? (v ?? null) : v;
     }
   }
   return Object.keys(out).length ? out : null;
 }
 
-/** Number of leaf values that differ. */
+/**
+ * Minimal patch turning `base` into `next` for PUT /settings (deep-merged by the Server).
+ * Arrays and scalars are replaced whole, and so is every REPLACED_WHOLE key (sent complete, or
+ * null to clear it). Returns null when nothing changed.
+ */
+export function diffSettings(base: unknown, next: unknown): Record<string, unknown> | null {
+  if (!isPlainObject(base) || !isPlainObject(next)) return sameValue(base, next) ? null : (next as Record<string, unknown>);
+  return diffObjects(base, next, true);
+}
+
+function countLeaves(v: unknown): number {
+  if (!isPlainObject(v)) return 1;
+  let n = 0;
+  for (const x of Object.values(v)) n += countLeaves(x);
+  return Math.max(1, n);
+}
+
+/** Number of leaf values that differ; a REPLACED_WHOLE value counts as one change. */
 export function countChanges(patch: Record<string, unknown> | null): number {
   if (!patch) return 0;
   let n = 0;
-  for (const v of Object.values(patch)) {
-    n += typeof v === 'object' && v !== null && !Array.isArray(v) ? Math.max(1, countChanges(v as Record<string, unknown>)) : 1;
-  }
+  for (const [k, v] of Object.entries(patch)) n += REPLACED_WHOLE.has(k) ? 1 : countLeaves(v);
   return n;
 }
 
@@ -317,19 +335,4 @@ export function parseIntList(text: string): number[] {
     .map((p) => p.trim())
     .filter(Boolean)
     .map((p) => (/^-?\d+$/.test(p) ? Number(p) : Number.NaN));
-}
-
-/**
- * The profile override is merged over the Agent's built-in profile; a deep merge cannot delete
- * keys, so removing keys needs the override cleared first (see ProfileOverrideEditor).
- */
-export function removesKeys(oldVal: unknown, newVal: unknown): boolean {
-  const isPlain = (v: unknown): v is Record<string, unknown> => typeof v === 'object' && v !== null && !Array.isArray(v);
-  // A non-object replacement (null, array, scalar) overwrites the whole value, so nothing lingers.
-  if (!isPlain(oldVal) || !isPlain(newVal)) return false;
-  for (const [k, v] of Object.entries(oldVal)) {
-    if (!(k in newVal)) return true;
-    if (isPlain(v) && removesKeys(v, newVal[k])) return true;
-  }
-  return false;
 }

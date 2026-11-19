@@ -1,4 +1,3 @@
-import QRCode from 'qrcode';
 import { useEffect, useState } from 'react';
 import { Spinner } from './primitives';
 
@@ -11,7 +10,9 @@ export function QrCode({ value, label, size = 224 }: { value: string; label: str
     let cancelled = false;
     setSrc(null);
     setError(null);
-    QRCode.toString(value, { type: 'svg', errorCorrectionLevel: 'M', margin: 2, color: { dark: '#000000', light: '#ffffff' } })
+    // The encoder is loaded on first use, so screens without a QR code do not carry it.
+    import('qrcode')
+      .then(({ default: QRCode }) => QRCode.toString(value, { type: 'svg', errorCorrectionLevel: 'M', margin: 2, color: { dark: '#000000', light: '#ffffff' } }))
       .then((svg) => {
         if (!cancelled) setSrc(`data:image/svg+xml;charset=utf-8,${encodeURIComponent(svg)}`);
       })

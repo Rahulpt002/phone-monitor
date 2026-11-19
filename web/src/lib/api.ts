@@ -220,7 +220,8 @@ export const api = {
   // users
   users: () => get<UserInfo[]>('/users'),
   createUser: (body: CreateUserRequest) => send<UserInfo>('POST', '/users', body),
-  updateUser: (id: number, patch: { role?: Role; password?: string }) => send<UserInfo>('PATCH', `/users/${id}`, patch),
+  /** `reset_totp: true` clears that user's authenticator and revokes their sessions (lost phone). */
+  updateUser: (id: number, patch: { role?: Role; password?: string; reset_totp?: true }) => send<UserInfo>('PATCH', `/users/${id}`, patch),
   deleteUser: (id: number) => send<void>('DELETE', `/users/${id}`),
 
   // pairing and devices

@@ -39,8 +39,9 @@ Server allows that origin in `CORS_ORIGINS`.
 
 **Separately on Vercel (optional).** Create a Vercel project with Root Directory `web` (keep "Include files outside
 the root directory" on, because `@hsm/shared` lives in the workspace). `web/vercel.json` installs from the repo
-root, builds, serves `dist`, and rewrites every route to `index.html`. Set `VITE_API_BASE` to the Server URL in the
-Vercel project, and add the Vercel URL to the Server's `CORS_ORIGINS`.
+root, builds, serves `dist`, and rewrites every route except `/assets/*` to `index.html` (so a chunk that a newer
+deploy removed answers 404, not HTML). Set `VITE_API_BASE` to the Server URL in the Vercel project, and add the
+Vercel URL to the Server's `CORS_ORIGINS`.
 
 ## Install on the monitoring phone
 
@@ -57,8 +58,12 @@ src/
   components/   layout (shell, nav, banners), charts (uPlot), command runner and control cards, UI primitives
   screens/      one file per screen
   sw.ts         service worker: precache, push, notification click, update
-test/           vitest suites (fixtures from shared/fixtures)
+test/           vitest suites (fixtures from shared/fixtures); component tests render through test/dom.tsx
 ```
+
+Login and Overview are in the first-paint bundle; every other screen is lazy-loaded as its own chunk (`src/App.tsx`),
+and the QR encoder loads on first use. The service worker precaches all chunks, so the installed app still opens
+every screen offline. A chunk that fails to load shows a Reload notice instead of a blank page.
 
 Viewer accounts see everything except Controls, the root console and Messages (plan 9). Admins without TOTP are
 guided to enrol before any control or settings change. Controls the phone reports as unsupported in its capability

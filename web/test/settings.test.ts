@@ -9,7 +9,6 @@ import {
   diffSettings,
   getPath,
   parseIntList,
-  removesKeys,
   setPath,
   validateField,
   validateSettings,
@@ -129,11 +128,29 @@ describe('patches for PUT /settings', () => {
     expect(getPath(next, 'alerts.enabled.hot')).toBe(false);
     expect(defaultFor('commands.revert_after_s')).toBe(120);
   });
-  it('detects when an override edit removes keys (needs a clear first)', () => {
-    expect(removesKeys({ a: 1, b: 2 }, { a: 1 })).toBe(true);
-    expect(removesKeys({ a: { x: 1, y: 2 } }, { a: { x: 1 } })).toBe(true);
-    expect(removesKeys({ a: 1 }, { a: 2, b: 3 })).toBe(false);
-    expect(removesKeys({ a: 1 }, null)).toBe(false);
-    expect(removesKeys(null, { a: 1 })).toBe(false);
+  it('sends the profile override whole, so one PUT can remove keys from it', () => {
+    const base = setPath(clone(), 'profile_override', { usb_function: 'ncm', thermal: { cpu: ['cpu'], battery: ['battery'] } });
+    const removed = setPath(base, 'profile_override', { thermal: { cpu: ['cpu'] } });
+    const patch = diffSettings(base, removed);
+    expect(patch).toEqual({ profile_override: { thermal: { cpu: ['cpu'] } } });
+    expect(mergeSettings(base, patch)).toEqual(removed);
+
+    // Changing one nested key still sends the complete override, so the other keys survive.
+    const edited = setPath(base, 'profile_override.thermal.cpu', ['cpu', 'cpu-1']);
+    const editPatch = diffSettings(base, edited);
+    expect(editPatch).toEqual({ profile_override: { usb_function: 'ncm', thermal: { cpu: ['cpu', 'cpu-1'], battery: ['battery'] } } });
+    expect(mergeSettings(base, editPatch)).toEqual(edited);
+  });
+  it('clears the override with null and leaves it out when unchanged', () => {
+    const base = setPath(clone(), 'profile_override', { usb_function: 'ncm' });
+    expect(diffSettings(base, setPath(base, 'profile_override', null))).toEqual({ profile_override: null });
+    expect(mergeSettings(base, { profile_override: null }).profile_override).toBeNull();
+    const other = setPath(base, 'plan.quota_gb', 10);
+    expect(diffSettings(base, other)).toEqual({ plan: { quota_gb: 10 } });
+  });
+  it('counts a changed override as one change', () => {
+    const base = setPath(clone(), 'profile_override', { a: 1, b: { c: 2, d: 3 } });
+    const next = setPath(setPath(base, 'profile_override.b.c', 5), 'plan.quota_gb', 10);
+    expect(countChanges(diffSettings(base, next))).toBe(2);
   });
 });

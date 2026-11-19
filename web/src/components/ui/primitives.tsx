@@ -90,6 +90,16 @@ const SIZE: Record<ButtonSize, string> = {
   lg: 'min-h-12 px-5 text-base',
 };
 
+/** A Button's classes, for links that should look like one (router <Link>). */
+export function buttonClass(variant: ButtonVariant = 'secondary', size: ButtonSize = 'md', className?: string): string {
+  return cx(
+    'inline-flex select-none items-center justify-center gap-2 rounded-xl font-medium transition-colors disabled:cursor-not-allowed disabled:opacity-50',
+    VARIANT[variant],
+    SIZE[size],
+    className,
+  );
+}
+
 export interface ButtonProps extends ButtonHTMLAttributes<HTMLButtonElement> {
   variant?: ButtonVariant;
   size?: ButtonSize;
@@ -106,12 +116,7 @@ export const Button = forwardRef<HTMLButtonElement, ButtonProps>(function Button
       type={type}
       disabled={disabled || busy}
       aria-busy={busy || undefined}
-      className={cx(
-        'inline-flex select-none items-center justify-center gap-2 rounded-xl font-medium transition-colors disabled:cursor-not-allowed disabled:opacity-50',
-        VARIANT[variant],
-        SIZE[size],
-        className,
-      )}
+      className={buttonClass(variant, size, className)}
       {...rest}
     >
       {busy ? <Spinner /> : null}

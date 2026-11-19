@@ -1,12 +1,13 @@
-import type { DeviceSummary, PairCodeResponse, Role, UserInfo } from '@hsm/shared';
+import type { DeviceSummary, PairCodeResponse } from '@hsm/shared';
 import { useCallback, useEffect, useState } from 'react';
 import { useSearchParams } from 'react-router-dom';
 import { SettingsEditor } from '../components/settings/SettingsEditor';
+import { MIN_PASSWORD, UsersPanel } from '../components/settings/UsersPanel';
 import { TotpEnrollment } from '../components/TotpEnrollment';
 import { CopyButton } from '../components/ui/CopyButton';
 import { Dialog } from '../components/ui/Dialog';
-import { Field, Select, TextInput } from '../components/ui/forms';
-import { Badge, Button, Card, Empty, Loading, Notice, PageHeader, TableWrap, cx, td, th } from '../components/ui/primitives';
+import { Field, TextInput } from '../components/ui/forms';
+import { Badge, Button, Card, Empty, Notice, PageHeader } from '../components/ui/primitives';
 import { QrCode } from '../components/ui/QrCode';
 import { Tabs } from '../components/ui/Tabs';
 import { api, errorMessage } from '../lib/api';
@@ -20,8 +21,6 @@ import { toast } from '../store/toasts';
 import { useUi } from '../store/ui';
 
 type TabId = 'device' | 'users' | 'account' | 'pairing';
-
-const MIN_PASSWORD = 10;
 
 export function SettingsScreen() {
   useDocumentTitle('Settings');
@@ -40,263 +39,10 @@ export function SettingsScreen() {
       <PageHeader title="Settings" subtitle="Thresholds, watchdog rules, alerts, users and pairing." />
       <Tabs label="Settings sections" tabs={tabs} active={active} onChange={(id) => setParams({ tab: id }, { replace: true })}>
         {active === 'device' ? <SettingsEditor focusSection={params.get('section')} /> : null}
-        {active === 'users' && isAdmin ? <UsersTab /> : null}
+        {active === 'users' && isAdmin ? <UsersPanel /> : null}
         {active === 'account' ? <AccountTab /> : null}
         {active === 'pairing' && isAdmin ? <PairingTab /> : null}
       </Tabs>
-    </div>
-  );
-}
-
-// --- users ------------------------------------------------------------------------------------
-
-function CreateUser({ onCreated, disabled }: { onCreated: (u: UserInfo) => void; disabled: boolean }) {
-  const [username, setUsername] = useState('');
-  const [password, setPassword] = useState('');
-  const [role, setRole] = useState<Role>('viewer');
-  const [busy, setBusy] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-  const userErr = !/^[a-zA-Z0-9._-]{3,32}$/.test(username) ? '3 to 32 letters, digits, dot, dash or underscore.' : null;
-  const pwErr = password.length < MIN_PASSWORD ? `At least ${MIN_PASSWORD} characters.` : null;
-  const [touched, setTouched] = useState(false);
-  return (
-    <form
-      className="grid grid-cols-1 gap-3 sm:grid-cols-[1fr_1fr_10rem_auto] sm:items-end"
-      onSubmit={async (e) => {
-        e.preventDefault();
-        setTouched(true);
-        if (userErr || pwErr) return;
-        setBusy(true);
-        setError(null);
-        try {
-          const u = await api.createUser({ username, password, role });
-          onCreated(u);
-          setUsername('');
-          setPassword('');
-          setTouched(false);
-          toast.success(`User ${u.username} created.`);
-        } catch (err) {
-          setError(errorMessage(err));
-        } finally {
-          setBusy(false);
-        }
-      }}
-    >
-      <Field label="Username" error={touched ? userErr : null}>
-        {({ id, describedBy, invalid }) => (
-          <TextInput id={id} autoComplete="off" autoCapitalize="none" value={username} onChange={(e) => setUsername(e.target.value)} aria-describedby={describedBy} aria-invalid={invalid} disabled={disabled} />
-        )}
-      </Field>
-      <Field label="Password" error={touched ? pwErr : null}>
-        {({ id, describedBy, invalid }) => (
-          <TextInput id={id} type="password" autoComplete="new-password" value={password} onChange={(e) => setPassword(e.target.value)} aria-describedby={describedBy} aria-invalid={invalid} disabled={disabled} />
-        )}
-      </Field>
-      <Field label="Role">
-        {({ id }) => (
-          <Select id={id} value={role} onChange={(e) => setRole(e.target.value as Role)} disabled={disabled}>
-            <option value="viewer">Viewer</option>
-            <option value="admin">Admin</option>
-          </Select>
-        )}
-      </Field>
-      <Button type="submit" variant="primary" busy={busy} disabled={disabled}>
-        Add user
-      </Button>
-      {error ? (
-        <div className="sm:col-span-4">
-          <Notice tone="danger">{error}</Notice>
-        </div>
-      ) : null}
-    </form>
-  );
-}
-
-function UsersTab() {
-  const me = useSession((s) => s.user);
-  const canControl = useCanControl();
-  const { data, loading, error, setData, reload } = useAsync(() => api.users(), []);
-  const [resetFor, setResetFor] = useState<UserInfo | null>(null);
-  const [deleteFor, setDeleteFor] = useState<UserInfo | null>(null);
-  const [newPw, setNewPw] = useState('');
-  const [busy, setBusy] = useState(false);
-  const [dialogError, setDialogError] = useState<string | null>(null);
-  const users = data ?? [];
-  const admins = users.filter((u) => u.role === 'admin').length;
-
-  const changeRole = async (u: UserInfo, role: Role) => {
-    try {
-      const updated = await api.updateUser(u.id, { role });
-      setData(users.map((x) => (x.id === u.id ? updated : x)));
-      toast.success(`${u.username} is now ${role === 'admin' ? 'an admin' : 'a viewer'}.`);
-    } catch (e) {
-      toast.error(errorMessage(e));
-      reload();
-    }
-  };
-
-  return (
-    <div className="space-y-4">
-      <Card title="Add a user">
-        <p className="mb-3 text-sm text-muted">Admins monitor and control. Viewers only monitor: no controls, root shell or messages (plan 9).</p>
-        <CreateUser onCreated={(u) => setData([...users, u])} disabled={!canControl} />
-      </Card>
-      <Card title="Users">
-        {loading && !users.length ? <Loading /> : null}
-        {error ? <Notice tone="danger">{errorMessage(error)}</Notice> : null}
-        {users.length ? (
-          <TableWrap label="Users">
-            <table className="w-full min-w-[34rem]">
-              <thead>
-                <tr className="border-b border-border">
-                  <th className={th}>User</th>
-                  <th className={th}>Role</th>
-                  <th className={th}>2FA</th>
-                  <th className={th}>Created</th>
-                  <th className={th}>
-                    <span className="sr-only">Actions</span>
-                  </th>
-                </tr>
-              </thead>
-              <tbody>
-                {users.map((u) => {
-                  const self = u.id === me?.id;
-                  const lastAdmin = u.role === 'admin' && admins <= 1;
-                  return (
-                    <tr key={u.id} className="border-b border-border/60 last:border-0">
-                      <td className={cx(td, 'font-medium')}>
-                        {u.username} {self ? <Badge>you</Badge> : null}
-                      </td>
-                      <td className={td}>
-                        <label className="sr-only" htmlFor={`role-${u.id}`}>
-                          Role of {u.username}
-                        </label>
-                        <Select
-                          id={`role-${u.id}`}
-                          value={u.role}
-                          onChange={(e) => changeRole(u, e.target.value as Role)}
-                          disabled={!canControl || self || lastAdmin}
-                          className="py-1.5"
-                        >
-                          <option value="admin">Admin</option>
-                          <option value="viewer">Viewer</option>
-                        </Select>
-                      </td>
-                      <td className={td}>{u.totp_enabled ? <Badge tone="ok">On</Badge> : <Badge tone={u.role === 'admin' ? 'warn' : 'neutral'}>Off</Badge>}</td>
-                      <td className={cx(td, 'text-muted')}>{formatDate(u.created_at)}</td>
-                      <td className={cx(td, 'whitespace-nowrap text-right')}>
-                        <Button
-                          size="sm"
-                          variant="ghost"
-                          disabled={!canControl}
-                          onClick={() => {
-                            setResetFor(u);
-                            setNewPw('');
-                            setDialogError(null);
-                          }}
-                        >
-                          Reset password
-                        </Button>
-                        <Button
-                          size="sm"
-                          variant="ghost"
-                          className="text-danger"
-                          disabled={!canControl || self || lastAdmin}
-                          title={self ? 'You cannot delete yourself' : lastAdmin ? 'Cannot delete the last admin' : undefined}
-                          onClick={() => {
-                            setDeleteFor(u);
-                            setDialogError(null);
-                          }}
-                        >
-                          Delete
-                        </Button>
-                      </td>
-                    </tr>
-                  );
-                })}
-              </tbody>
-            </table>
-          </TableWrap>
-        ) : !loading && !error ? (
-          <Empty>No users.</Empty>
-        ) : null}
-      </Card>
-
-      <Dialog
-        open={Boolean(resetFor)}
-        onClose={() => setResetFor(null)}
-        title={`Reset password for ${resetFor?.username ?? ''}`}
-        footer={
-          <>
-            <Button onClick={() => setResetFor(null)}>Cancel</Button>
-            <Button variant="primary" type="submit" form="reset-pw" busy={busy}>
-              Set password
-            </Button>
-          </>
-        }
-      >
-        <form
-          id="reset-pw"
-          onSubmit={async (e) => {
-            e.preventDefault();
-            if (!resetFor) return;
-            if (newPw.length < MIN_PASSWORD) {
-              setDialogError(`At least ${MIN_PASSWORD} characters.`);
-              return;
-            }
-            setBusy(true);
-            try {
-              await api.updateUser(resetFor.id, { password: newPw });
-              toast.success(`Password for ${resetFor.username} changed.`);
-              setResetFor(null);
-            } catch (err) {
-              setDialogError(errorMessage(err));
-            } finally {
-              setBusy(false);
-            }
-          }}
-        >
-          <Field label="New password" error={dialogError}>
-            {({ id, describedBy, invalid }) => (
-              <TextInput id={id} type="password" autoComplete="new-password" value={newPw} onChange={(e) => setNewPw(e.target.value)} aria-describedby={describedBy} aria-invalid={invalid} data-autofocus />
-            )}
-          </Field>
-        </form>
-      </Dialog>
-
-      <Dialog
-        open={Boolean(deleteFor)}
-        onClose={() => setDeleteFor(null)}
-        title={`Delete ${deleteFor?.username ?? ''}?`}
-        description="They are signed out and cannot sign in again."
-        footer={
-          <>
-            <Button onClick={() => setDeleteFor(null)}>Cancel</Button>
-            <Button
-              variant="danger"
-              busy={busy}
-              onClick={async () => {
-                if (!deleteFor) return;
-                setBusy(true);
-                try {
-                  await api.deleteUser(deleteFor.id);
-                  setData(users.filter((x) => x.id !== deleteFor.id));
-                  toast.success(`${deleteFor.username} deleted.`);
-                  setDeleteFor(null);
-                } catch (err) {
-                  setDialogError(errorMessage(err));
-                } finally {
-                  setBusy(false);
-                }
-              }}
-            >
-              Delete user
-            </Button>
-          </>
-        }
-      >
-        {dialogError ? <Notice tone="danger">{dialogError}</Notice> : <p className="text-sm text-muted">This cannot be undone.</p>}
-      </Dialog>
     </div>
   );
 }

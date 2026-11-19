@@ -59,7 +59,18 @@ export default defineConfig({
   build: {
     target: 'es2022',
     sourcemap: true,
-    chunkSizeWarningLimit: 900,
+    // Screens are lazy-loaded (src/App.tsx); no chunk should come near this.
+    chunkSizeWarningLimit: 300,
+    rolldownOptions: {
+      output: {
+        codeSplitting: {
+          groups: [
+            // Framework code every page needs; its own chunk stays cached across app-only deploys.
+            { name: 'vendor', test: /node_modules[\\/](react|react-dom|scheduler|react-router|react-router-dom|zustand|use-sync-external-store)[\\/]/ },
+          ],
+        },
+      },
+    },
   },
   test: {
     environment: 'jsdom',

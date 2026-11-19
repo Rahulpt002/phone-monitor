@@ -4,11 +4,15 @@
  */
 import { useEffect, useState } from 'react';
 import { api, errorMessage, isAbort } from '../../lib/api';
+import { useDocumentVisible } from '../../lib/hooks';
 import { syncPushSubscription } from '../../lib/push';
 import { useConn } from '../../store/conn';
 import { useData } from '../../store/data';
 import { useSession } from '../../store/session';
 import { useUi } from '../../store/ui';
+
+/** How often to look for a newly paired phone while none is paired. */
+export const NO_PHONE_POLL_MS = 15_000;
 
 export interface LoaderState {
   devicesLoaded: boolean;
@@ -21,9 +25,13 @@ export function useDataLoader(): LoaderState {
   const isAdmin = useSession((s) => s.user?.role === 'admin');
   const epoch = useConn((s) => s.epoch);
   const deviceId = useUi((s) => s.deviceId);
+  const noPhone = useData((s) => s.devices.length === 0);
+  const visible = useDocumentVisible();
   const [devicesLoaded, setDevicesLoaded] = useState(false);
-  const [error, setError] = useState<string | null>(null);
+  const [devicesError, setDevicesError] = useState<string | null>(null);
+  const [dataError, setDataError] = useState<string | null>(null);
   const [tick, setTick] = useState(0);
+  const [devicesTick, setDevicesTick] = useState(0);
 
   useEffect(() => {
     if (!token) return;
@@ -36,15 +44,24 @@ export function useDataLoader(): LoaderState {
         const cur = useUi.getState().deviceId;
         if (!cur || !devices.some((d) => d.device_id === cur)) useUi.getState().setDeviceId(devices[0]?.device_id ?? null);
         setDevicesLoaded(true);
-        setError(null);
+        setDevicesError(null);
       })
       .catch((e: unknown) => {
-        if (!isAbort(e)) setError(errorMessage(e));
+        if (!isAbort(e)) setDevicesError(errorMessage(e));
       });
     return () => ctrl.abort();
-  }, [token, epoch, tick]);
+  }, [token, epoch, tick, devicesTick]);
+
+  // The socket only reports phones the Dashboard already knows, so look for a new one now and then.
+  useEffect(() => {
+    if (!token || !devicesLoaded || !noPhone || !visible) return;
+    const id = setInterval(() => setDevicesTick((t) => t + 1), NO_PHONE_POLL_MS);
+    return () => clearInterval(id);
+  }, [token, devicesLoaded, noPhone, visible]);
 
   useEffect(() => {
+    // A previous run may have failed for a device that is gone (unpaired, or a stale stored id).
+    setDataError(null);
     if (!token || !deviceId) return;
     const ctrl = new AbortController();
     const { signal } = ctrl;
@@ -61,7 +78,7 @@ export function useDataLoader(): LoaderState {
     void Promise.allSettled(jobs).then((results) => {
       if (signal.aborted) return;
       const failed = results.filter((r): r is PromiseRejectedResult => r.status === 'rejected' && !isAbort(r.reason));
-      setError(failed.length ? `Some data could not be loaded: ${errorMessage(failed[0]!.reason)}` : null);
+      setDataError(failed.length ? `Some data could not be loaded: ${errorMessage(failed[0]!.reason)}` : null);
     });
     return () => ctrl.abort();
   }, [token, deviceId, epoch, isAdmin, tick]);
@@ -71,5 +88,5 @@ export function useDataLoader(): LoaderState {
     if (token) void syncPushSubscription();
   }, [token]);
 
-  return { devicesLoaded, error, retry: () => setTick((t) => t + 1) };
+  return { devicesLoaded, error: devicesError ?? dataError, retry: () => setTick((t) => t + 1) };
 }

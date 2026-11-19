@@ -1,5 +1,5 @@
 import { useEffect } from 'react';
-import { Link, Outlet } from 'react-router-dom';
+import { Outlet, useLocation } from 'react-router-dom';
 import { startSocket } from '../../store/conn';
 import { useData } from '../../store/data';
 import { useSession } from '../../store/session';
@@ -7,6 +7,8 @@ import { CommandRunnerProvider } from '../commands/CommandRunner';
 import { Button, Loading, Notice } from '../ui/primitives';
 import { ConnectionBanner, TotpBanner } from './Banners';
 import { BottomTabs, SideNav } from './Navigation';
+import { NoPhonePaired, usableWithoutPhone } from './NoPhone';
+import { ScreenBoundary } from './RouteBoundary';
 import { TopBar } from './TopBar';
 import { useDataLoader } from './useDataLoader';
 
@@ -54,32 +56,17 @@ export function AppShell() {
   );
 }
 
-function MainContent({ loaded }: { loaded: boolean }) {
+export function MainContent({ loaded }: { loaded: boolean }) {
   const devices = useData((s) => s.devices);
-  const isAdmin = useSession((s) => s.user?.role === 'admin');
+  const { pathname } = useLocation();
   if (!loaded && !devices.length) {
     return <Loading label="Connecting to the server (a sleeping free server can take up to a minute)" />;
   }
+  // The phone screens have nothing to show without a phone; Settings (pairing) and Alerts still work.
+  if (loaded && !devices.length && !usableWithoutPhone(pathname)) return <NoPhonePaired />;
   return (
-    <>
-      {loaded && !devices.length ? (
-        <div className="mb-4">
-          <Notice tone="info" title="No phone paired yet">
-            {isAdmin ? (
-              <>
-                Pair the hotspot phone from{' '}
-                <Link className="font-semibold text-accent underline" to="/settings?tab=pairing">
-                  Settings &gt; Pairing
-                </Link>
-                .
-              </>
-            ) : (
-              'Ask an admin to pair the hotspot phone.'
-            )}
-          </Notice>
-        </div>
-      ) : null}
+    <ScreenBoundary>
       <Outlet />
-    </>
+    </ScreenBoundary>
   );
 }
