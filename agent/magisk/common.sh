@@ -112,17 +112,20 @@ apply_exemptions() {
 }
 
 # Start the Agent's foreground service. Returns 0 when the process is up afterwards.
+# $1 = reason reported in the Agent's agent_start event: boot | restart (default) | manual | update.
 start_agent() {
+	start_reason=${1:-restart}
+	case "$start_reason" in boot | restart | manual | update) ;; *) start_reason=restart ;; esac
 	# 0x10000020 = FLAG_RECEIVER_FOREGROUND | FLAG_INCLUDE_STOPPED_PACKAGES: reaches the app even
 	# before its first launch or after a force-stop.
-	am broadcast --user 0 -a "$ACTION_START" -n "$RECEIVER" -f 0x10000020 >/dev/null 2>&1
+	am broadcast --user 0 -a "$ACTION_START" -n "$RECEIVER" -f 0x10000020 --es reason "$start_reason" >/dev/null 2>&1
 	i=0
 	while [ "$i" -lt 10 ]; do
 		sleep 1
 		if agent_running && service_running; then return 0; fi
 		i=$((i + 1))
 	done
-	am start-foreground-service --user 0 -n "$SERVICE" >/dev/null 2>&1
+	am start-foreground-service --user 0 -n "$SERVICE" --es reason "$start_reason" >/dev/null 2>&1
 	i=0
 	while [ "$i" -lt 10 ]; do
 		sleep 1

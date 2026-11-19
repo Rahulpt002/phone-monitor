@@ -61,7 +61,7 @@ if agent_installed; then
 	prepare
 	if agent_running && service_running; then
 		log_msg "Agent already running"
-	elif start_agent; then
+	elif start_agent boot; then
 		log_msg "Agent started"
 	else
 		log_msg "Agent did not start (will retry every ${CHECK_INTERVAL}s)"

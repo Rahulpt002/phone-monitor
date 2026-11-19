@@ -5,6 +5,7 @@ import com.hotspotmonitor.agent.protocol.BatteryStatus
 import com.hotspotmonitor.agent.protocol.IfCounters
 import com.hotspotmonitor.agent.protocol.PlugType
 import com.hotspotmonitor.agent.root.CurrentNowSpec
+import com.hotspotmonitor.agent.root.DeviceProfile
 import com.hotspotmonitor.agent.root.ThermalSpec
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -177,6 +178,37 @@ class TelemetryMathTest {
         assertEquals(47.0, custom.cpu!!, 0.0)
         assertNull(custom.modem)
         assertNull(custom.skin)
+    }
+
+    @Test
+    fun thermalKeywordsMatchUpperCaseZoneTypes() {
+        // Exynos / Tensor zone types are upper case; profile keywords are lower case.
+        val zones = listOf(
+            ThermalZone("BIG", 61.0),
+            ThermalZone("MID", 55.0),
+            ThermalZone("LITTLE", 48.0),
+            ThermalZone("G3D", 50.0),
+            ThermalZone("Battery", 34.5),
+            ThermalZone("SKIN_THERM", 38.0),
+        )
+        val s = ThermalMath.summarize(zones, ThermalSpec(cpu = listOf("big", "mid", "little"), modem = emptyList(), skin = listOf("skin"), battery = listOf("battery")))
+        assertEquals(61.0, s.cpu!!, 0.0)
+        assertEquals(38.0, s.skin!!, 0.0)
+        assertEquals(34.5, s.battery!!, 0.0)
+        // Keywords in upper case work too.
+        assertEquals(48.0, ThermalMath.summarize(zones, ThermalSpec(cpu = listOf("LITTLE"))).cpu!!, 0.0)
+        // The built-in defaults cover them as well.
+        assertEquals(61.0, ThermalMath.summarize(zones, ThermalSpec()).cpu!!, 0.0)
+    }
+
+    @Test
+    fun qualcommSocChargeLevelZoneIsNotACpuTemperature() {
+        // On Qualcomm the "soc" zone is the battery current limiter's state of charge (here 95 %),
+        // which would read as 95 °C. Neither the defaults nor the built-in profile may match it.
+        val zones = listOf(ThermalZone("soc", 95.0), ThermalZone("cpu-0-0-usr", 41.0), ThermalZone("tsens_tz_sensor1", 39.0))
+        assertFalse(ThermalSpec().cpu.any { it.equals("soc", ignoreCase = true) })
+        assertEquals(41.0, ThermalMath.summarize(zones, ThermalSpec()).cpu!!, 0.0)
+        assertEquals(41.0, ThermalMath.summarize(zones, DeviceProfile.GENERIC.thermal).cpu!!, 0.0)
     }
 
     @Test

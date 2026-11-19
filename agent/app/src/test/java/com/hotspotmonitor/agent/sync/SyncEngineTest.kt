@@ -242,6 +242,107 @@ class SyncEngineTest {
     }
 
     @Test
+    fun close4002FollowedByOnClosedStillReconnectsOnceAfterThirtySeconds() = runTest {
+        // OkHttp reports both onClosing and onClosed for the same close; only one reconnect may follow.
+        val h = started()
+        val c = connected(h)
+        c.listener.onClosing(4002, "replaced")
+        runCurrent()
+        c.listener.onClosed(4002, "replaced")
+        runCurrent()
+        advanceTimeBy(29_999)
+        runCurrent()
+        assertEquals(1, h.transport.connections.size)
+        advanceTimeBy(2)
+        runCurrent()
+        assertEquals(2, h.transport.connections.size)
+        connected(h)
+        advanceTimeBy(120_000)
+        runCurrent()
+        assertEquals("no second reconnect from the duplicate close", 2, h.transport.connections.size)
+        assertEquals(ConnPhase.CONNECTED, h.engine.state.value.phase)
+    }
+
+    @Test
+    fun close1001IsANormalReconnectWithBackoff() = runTest {
+        // docs/protocol.md 3.1: the Server is shutting down or deploying.
+        val h = started()
+        val c = connected(h)
+        c.listener.onClosing(1001, "server shutting down")
+        runCurrent()
+        assertEquals(ConnPhase.WAITING, h.engine.state.value.phase)
+        assertNotNull(h.host.creds)
+        assertTrue(h.host.unauthorized.isEmpty())
+        advanceTimeBy(1_999)
+        runCurrent()
+        assertEquals("first retry after the 2 s backoff, not 30 s", 1, h.transport.connections.size)
+        advanceTimeBy(2)
+        runCurrent()
+        assertEquals(2, h.transport.connections.size)
+
+        // Render redeploys: refused upgrades while the new instance starts back off further.
+        h.transport.last.listener.onFailure(IOException("connection refused"), 502)
+        runCurrent()
+        advanceTimeBy(3_999)
+        runCurrent()
+        assertEquals(2, h.transport.connections.size)
+        advanceTimeBy(2)
+        runCurrent()
+        assertEquals(3, h.transport.connections.size)
+        connected(h)
+        assertEquals(ConnPhase.CONNECTED, h.engine.state.value.phase)
+    }
+
+    @Test
+    fun closeEventsFromAnAbandonedSocketAreIgnored() = runTest {
+        val h = started()
+        val old = connected(h)
+        // Re-paired: the Agent drops the old socket and connects with the new token.
+        h.host.creds = SyncCredentials("wss://hsm.example.test/ws/agent", "tok_2", "d_2")
+        h.engine.onPaired()
+        runCurrent()
+        assertEquals(2, h.transport.connections.size)
+        val current = connected(h)
+        assertEquals(ConnPhase.CONNECTED, h.engine.state.value.phase)
+
+        // Late callbacks from the old socket: none of them may touch the current link.
+        old.listener.onMessage("""{"t":"error","code":"unauthorized"}""")
+        old.listener.onClosing(4001, "unauthorized")
+        old.listener.onClosed(4002, "replaced")
+        old.listener.onFailure(IOException("connection reset"), null)
+        runCurrent()
+        assertEquals(ConnPhase.CONNECTED, h.engine.state.value.phase)
+        assertTrue("4001 from the old socket must not forget the new pairing", h.host.unauthorized.isEmpty())
+        assertEquals("tok_2", h.host.creds?.token)
+        assertTrue(current.open)
+        advanceTimeBy(120_000)
+        runCurrent()
+        assertEquals(2, h.transport.connections.size)
+
+        // A socket abandoned after the hello timeout is ignored as well.
+        current.listener.onClosed(1006, "")
+        runCurrent()
+        advanceTimeBy(2_001)
+        runCurrent()
+        assertEquals(3, h.transport.connections.size)
+        val third = h.transport.last
+        third.listener.onOpen()
+        advanceTimeBy(30_001)
+        runCurrent()
+        assertTrue(third.cancelled)
+        advanceTimeBy(4_001) // second failure in a row: 4 s
+        runCurrent()
+        assertEquals(4, h.transport.connections.size)
+        connected(h)
+        third.listener.onClosing(4002, "replaced")
+        runCurrent()
+        assertEquals(ConnPhase.CONNECTED, h.engine.state.value.phase)
+        advanceTimeBy(60_000)
+        runCurrent()
+        assertEquals(4, h.transport.connections.size)
+    }
+
+    @Test
     fun backoffDoublesAndResetsAfterALinkThatStayedUpForAMinute() = runTest {
         val h = started()
         h.transport.last.listener.onFailure(IOException("connection refused"), null)

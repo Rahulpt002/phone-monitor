@@ -62,10 +62,14 @@ data class AutobootSpec(
     val note: String? = null,
 )
 
-/** Substrings matched against /sys/class/thermal/thermal_zoneN/type. */
+/**
+ * Substrings matched case-insensitively against /sys/class/thermal/thermal_zoneN/type (Exynos and
+ * Tensor zones are upper case: BIG, MID, LITTLE). Never list "soc" here: on Qualcomm the `soc`
+ * zone is the battery current limiter's state-of-charge sensor and reports percent, not °C.
+ */
 @Serializable
 data class ThermalSpec(
-    val cpu: List<String> = listOf("cpu", "tsens", "soc"),
+    val cpu: List<String> = listOf("cpu", "tsens", "big", "mid", "little"),
     val modem: List<String> = listOf("modem", "mdm", "pa_therm"),
     val skin: List<String> = listOf("skin", "xo_therm", "quiet_therm"),
     val battery: List<String> = listOf("battery"),
@@ -76,7 +80,11 @@ data class DeviceProfile(
     val id: String,
     val name: String = id,
     val match: ProfileMatch = ProfileMatch(),
-    /** Tried in order; the first path that exists and is writable wins. */
+    /**
+     * Tried in order; the first path that exists, has its owner write bit set and accepts its
+     * current value written back wins (control/ChargeProbe). One that then does not stop charging
+     * while plugged in is skipped for the next.
+     */
     @SerialName("charge_control") val chargeControl: List<ChargeControlPath> = emptyList(),
     @SerialName("current_now") val currentNow: CurrentNowSpec = CurrentNowSpec(),
     /** rndis | ncm */
@@ -110,7 +118,7 @@ data class DeviceProfile(
                 ChargeControlPath("/sys/class/power_supply/battery/battery_charging_enabled", on = "1", off = "0",
                     note = "Older Qualcomm kernels"),
                 ChargeControlPath("/sys/class/power_supply/battery/batt_slate_mode", on = "0", off = "1",
-                    note = "Samsung: slate mode runs the phone from USB while the battery rests"),
+                    note = "Samsung: stops charging; on most kernels it also cuts USB input, so the phone runs from the battery"),
                 ChargeControlPath("/sys/class/power_supply/battery/charge_disable", on = "0", off = "1",
                     note = "Some MediaTek and Qualcomm kernels"),
                 ChargeControlPath("/sys/devices/platform/charger/bypass_charger", on = "0", off = "1",

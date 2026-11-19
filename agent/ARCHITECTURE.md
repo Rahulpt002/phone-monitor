@@ -436,7 +436,7 @@ directory may be empty). `settings.profile_override` is deep-merged over the cho
   "current_now": { "unit": "uA", "sign": 1 },
   "usb_function": "rndis",
   "autoboot": { "method": "magisk_autoboot", "note": "..." },
-  "thermal": { "cpu": ["cpu", "tsens", "soc"], "modem": ["modem", "mdm", "pa_therm"],
+  "thermal": { "cpu": ["big", "mid", "little", "cpu", "tsens"], "modem": ["modem", "mdm", "pa_therm"],
                "skin": ["skin", "xo_therm", "quiet_therm"], "battery": ["battery"] },
   "commands": { "<command name>": ["shell template with {placeholders}", "..."] },
   "network_mode": { "<NetworkMode>": "<value for the device's mechanism>" },
@@ -444,23 +444,43 @@ directory may be empty). `settings.profile_override` is deep-merged over the cho
 }
 ```
 
-`commands.<name>` templates get these placeholders (values are shell-quoted by
-`DeviceProfile.render`; a template whose placeholder is missing is skipped):
+`commands.<name>` templates run as root **before** the built-in commands, in order; the first that
+exits 0 (and, where ControlsImpl can read the state back, really changed it) wins, else the
+built-ins are tried. Placeholders (values are shell-quoted by `DeviceProfile.render`; a template
+whose placeholder the command does not supply is skipped and logged):
 
 | Command | Placeholders |
 |---------|--------------|
-| every switch (mobile_data, airplane_mode, usb_tethering, hotspot, wifi, bluetooth, ...) | `{enabled}` true/false, `{state}` 1/0, `{action}` enable/disable |
-| `usb_tethering` | also `{function}` rndis / ncm / none |
-| `hotspot` | also `{ssid}`, `{password}` |
-| `network_mode` | `{mode}`, `{value}` (the profile's `network_mode` entry), `{bitmask}` (decimal), `{bitmask_bin}`, `{slot}`, `{sub_id}` |
-| `screen` | `{on}`, `{keycode}` |
-| `brightness` | `{level}` |
+| `mobile_data`, `airplane_mode`, `wifi`, `bluetooth` | `{enabled}` true/false, `{state}` 1/0, `{action}` enable/disable |
+| `usb_tethering` | the switch three, plus `{function}`: rndis / ncm when on (command arg, else profile `usb_function`), `none` when off |
+| `hotspot` | the switch three, plus `{ssid}`, `{password}` when on only (templates logged unrendered) |
+| `network_mode` | `{mode}` (wire value), `{value}` (the profile's `network_mode` entry, else `{bitmask_bin}`), `{bitmask}` (decimal), `{bitmask_bin}`, `{slot}` (SIM slot of the default data SIM), `{sub_id}` |
+| `screen` | `{on}` true/false, `{keycode}` 224 / 223 |
+| `brightness` | `{level}` 0-255 |
 | `app_force_stop`, `app_enable`, `app_disable` | `{package}` |
+| `reboot`, `power_off`, `process_list` | none |
 
-`data_cycle` and `airplane_cycle` reuse the `mobile_data` / `airplane_mode` templates. A
-`network_mode` map value without a `network_mode` template is passed to
-`cmd phone set-allowed-network-types-for-users -s <slot> <value>`, so it must be a binary bitmask
-string.
+One template list serves both directions of a switch: the direction reaches it only through
+`{enabled}` / `{state}` / `{action}` (`svc data {action}`), so a template without them runs for on
+and off alike. `data_cycle` (and the watchdog's data cycle) reuse the `mobile_data` templates;
+`airplane_cycle` and the heat rule's radio rest reuse `airplane_mode`. `charging` /
+`charge_limit` use `charge_control`, never templates. A template makes the command count as
+supported in the capability map.
+
+`network_mode` map: NetworkMode wire value -> value for this phone. Without a `network_mode`
+template the Agent runs `cmd phone set-allowed-network-types-for-users -s {slot} <value>`, where
+`<value>` is the map entry or the built-in mask; AOSP parses it with radix 2, so a map entry must
+be a **binary bitmask string** (`lte_only` = `1000001000000000000`), and one that is not a plain
+token (`[A-Za-z0-9_|,.:+-]{1,64}`) is offered to templates only. With a map entry the Agent does
+not verify the result (it cannot know the format). docs/device-profiles.md section 3 lists the
+built-in masks.
+
+`charge_control`: ChargeProbe picks the first path that exists, has its owner write bit set
+(`stat -c %a`, else `ls -l`; never `[ -w ]` / File.canWrite, which root always passes) and, when it
+holds its own `on` / `off` value, takes that value written back. The first stop while plugged in
+and charging is then watched for ~30 s (like `phase0.sh charge-discover --test`); a path that
+left the battery charging is restored to `on`, skipped until restart or a profile change, and an
+`error` event (`where: charge_control`) names the next path.
 
 ## 9. Threading rules
 
@@ -496,7 +516,8 @@ RootSetup (run by `startAll`, or "Grant all via root" on the Setup screen) grant
 permissions, usage access, unrestricted background running and the doze whitelist, and switches
 location services on (`cmd location set-location-enabled true`, falling back to
 `settings put secure location_mode 3` and the per-provider list): Android 10+ returns no cell info
-while location is off. It re-runs when location is switched off again. It does not change
+while location is off. The check runs at every service start (and from the Setup screen), so a
+location switch turned off later is turned on again at the next start. It does not change
 `hidden_api_policy`; hotspot state falls back to the tethering list when
 `WifiManager.isWifiApEnabled` is blocked.
 

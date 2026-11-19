@@ -2,6 +2,9 @@ package com.hotspotmonitor.agent.protocol
 
 import com.hotspotmonitor.agent.testutil.Fixtures
 import com.hotspotmonitor.agent.testutil.canonical
+import kotlinx.serialization.json.JsonArray
+import kotlinx.serialization.json.JsonElement
+import kotlinx.serialization.json.JsonNull
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
@@ -173,6 +176,52 @@ class ProtocolFixturesTest {
         assertEquals(31, settings.settings.watchdog.internetFailS)
         assertEquals(Settings.DEFAULT.telemetry, settings.settings.telemetry)
         assertEquals(7, settings.version)
+    }
+
+    /** Removes every null-valued key, at any depth (what a Server that omits nulls would send). */
+    private fun stripNulls(element: JsonElement): JsonElement = when (element) {
+        is JsonObject -> JsonObject(element.filterValues { it !is JsonNull }.mapValues { stripNulls(it.value) })
+        is JsonArray -> JsonArray(element.map { stripNulls(it) })
+        else -> element
+    }
+
+    private fun decodeServer(obj: JsonObject): ServerToAgent? = Wire.decodeServerMessage(obj.toString())
+
+    @Test
+    fun missingAndNullFieldsDecodeTheSame() {
+        val fixtures = Fixtures.objects("server-to-agent.json")
+        val withNulls = fixtures.filter { it.toString() != stripNulls(it).toString() }.map { it.t() }.toSet()
+        assertTrue("the fixture exercises null-valued keys: $withNulls", withNulls.containsAll(setOf("hello", "settings", "cmd")))
+        for (obj in fixtures) {
+            val t = obj.t()
+            val original = decodeServer(obj)
+            assertNotNull("decode of '$t'", original)
+            val stripped = stripNulls(obj) as JsonObject
+            assertEquals("'$t' with every null-valued key removed", original, decodeServer(stripped))
+        }
+
+        // The other way round: an explicit null for a field that has a default (coerceInputValues)
+        // decodes exactly like the missing field instead of failing the message.
+        val hello = fixtures.first { it.t() == "hello" }
+        val helloNullRates = decodeServer(JsonObject(hello + ("rates" to JsonNull))) as HelloMsg
+        assertEquals(decodeServer(JsonObject(hello - "rates")), helloNullRates)
+        assertEquals(Rates(), helloNullRates.rates)
+
+        val cmd = fixtures.first { it.t() == "cmd" }
+        val cmdNulls = JsonObject(cmd + mapOf("args" to JsonNull, "user" to JsonNull, "revert_after_s" to JsonNull))
+        assertEquals(decodeServer(JsonObject(cmd - setOf("args", "user", "revert_after_s"))), decodeServer(cmdNulls))
+        assertEquals(JsonObject(emptyMap()), (decodeServer(cmdNulls) as CmdMsg).args)
+
+        val error = fixtures.first { it.t() == "error" }
+        assertEquals(decodeServer(JsonObject(error - "message")), decodeServer(JsonObject(error + ("message" to JsonNull))))
+
+        // Nested settings: a null group or value keeps the default, like a missing one.
+        val settingsNull = Wire.decodeServerMessage(
+            """{"t":"settings","version":8,"settings":{"telemetry":null,"watchdog":{"enabled":null,"internet_fail_s":null},"profile_override":null}}""",
+        ) as SettingsMsg
+        val settingsMissing = Wire.decodeServerMessage("""{"t":"settings","version":8,"settings":{"watchdog":{}}}""") as SettingsMsg
+        assertEquals(settingsMissing, settingsNull)
+        assertEquals(Settings.DEFAULT.watchdog, settingsNull.settings.watchdog)
     }
 
     @Test

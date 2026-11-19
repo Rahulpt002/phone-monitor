@@ -24,6 +24,7 @@ AGENT_PKG=com.hotspotmonitor.agent
 PHASE0_ROWS="Bootloader:yes
 Root:yes
 Automatic power-on:yes
+Root after cold boot:yes
 Tethering after reboot:yes
 Power budget:yes
 Charge control:yes
@@ -65,7 +66,9 @@ Nothing changes on the phone unless an option says so, and those options ask fir
 Commands:
   info                    Model, Android / One UI, build, bootloader and OEM-unlock state,
                           Knox warranty bit, carrier, IMEI (last 4 digits only)
-  root [--reboot]         Check su and the root manager. --reboot reboots to prove root survives
+  root [--reboot] [--cold-boot]
+                          Check su and the root manager. --reboot reboots to prove root survives;
+                          --cold-boot powers off, you start the phone, and root is checked again
   commands [--live]       Check every control from plan 6.3 (help text only). --live toggles
                           each control and restores it, asking before anything that can drop adb
   signal [--seconds N] [--slot N]
@@ -81,7 +84,8 @@ Commands:
                           --reboot-test reboots and checks tethering comes back by itself
   autoboot [--check] [--fastboot] [--test] [--confirm pass|fail]
                           Explain and check automatic power-on. --fastboot sets
-                          off-mode-charge 0 (non-Samsung), --test powers off and waits for a boot
+                          off-mode-charge 0 (non-Samsung), --test powers off, waits for a boot
+                          and checks root still works after it
   power-log start [--interval S] [--hours H] [--fresh] | status | stop | pull [--min-hours H]
                           On-phone battery logger (default every 60 s, until stopped) and the
                           power-budget verdict
@@ -786,11 +790,33 @@ root_impl() {
 	printf 'su %s' "$(rsh 'su -v' | head -n 1)"
 }
 
+# Phase 0 row "Root after cold boot": su must work after a start from fully off (a power cut),
+# not only after a reboot. Galaxy S10-family phones (launched with Android 9) keep Magisk in the
+# recovery partition and come up WITHOUT root after a cold power-on. $1 describes the boot.
+# Retries for up to 60 s: the root daemon can start a little after sys.boot_completed.
+check_cold_boot_root() {
+	local how=$1 waited=0 impl
+	while :; do
+		HAVE_ROOT=""
+		if root_ok; then
+			impl=$(root_impl)
+			record "Root after cold boot" PASS "$impl; su works after $how"
+			return 0
+		fi
+		[ "$waited" -lt 60 ] || break
+		sleep 5
+		waited=$((waited + 5))
+	done
+	record "Root after cold boot" FAIL "su does not work after $how: after a power cut the Agent would run without root (no charge control, no recovery actions). Galaxy S10 family: Magisk sits in recovery; prefer an S20 or S21"
+	return 1
+}
+
 cmd_root() {
-	local do_reboot=0 id_out impl bid prev_bid first_api
+	local do_reboot=0 do_cold=0 id_out impl bid prev_bid first_api newbid
 	while [ $# -gt 0 ]; do
 		case "$1" in
 		--reboot) do_reboot=1 ;;
+		--cold-boot) do_cold=1 ;;
 		*) die "root: unknown option $1" 2 ;;
 		esac
 		shift
@@ -822,7 +848,7 @@ cmd_root() {
 	kv_set root.env impl "$impl"
 	first_api=$(ash 'getprop ro.product.first_api_level' | tr -d ' \n')
 	if [ "$(printf '%s' "$DEV_MANUF" | tr 'A-Z' 'a-z')" = samsung ] && is_uint "$first_api" && [ "$first_api" -le 28 ]; then
-		warn "This Samsung launched with Android 9 or older (first API $first_api), e.g. the Galaxy S10: its boot image has no ramdisk, so Magisk sits in the recovery partition and root is only active when the phone boots through recovery. A cold power-on after a power cut would start WITHOUT root. 'root --reboot' (a normal reboot) shows whether this phone is affected."
+		warn "This Samsung launched with Android 9 or older (first API $first_api), e.g. the Galaxy S10: its boot image has no ramdisk, so Magisk sits in the recovery partition and root is only active when the phone boots through recovery. A cold power-on after a power cut would start WITHOUT root. Run 'root --cold-boot' (and 'autoboot --test') to prove it either way; prefer an S20 or S21."
 	fi
 	prev_bid=$(kv_get root.env ok_boot_id)
 
@@ -843,6 +869,29 @@ cmd_root() {
 				record "Root" FAIL "root lost after reboot ($impl)"
 				return 1
 			fi
+		fi
+	fi
+	if [ "$do_cold" = 1 ]; then
+		say ""
+		say "Cold-boot test: the phone powers off; then start it yourself with the power button (a normal"
+		say "start, NOT recovery: no key combination). With automatic power-on set up, plugging in is enough."
+		if confirm "Power the phone OFF now? adb disconnects until you start it again."; then
+			kv_set root.env ok_boot_id "$bid"
+			rsh "svc power shutdown" >/dev/null
+			wait_device_gone 60 || true
+			say "Phone is off. Start it now (power button). Waiting up to 5 minutes..."
+			if ! wait_boot 300; then
+				record "Root after cold boot" PARTIAL "the phone did not come back within 5 minutes: start it and re-run root --cold-boot"
+				return 1
+			fi
+			newbid=$(boot_id)
+			if [ "$newbid" = "$bid" ]; then
+				record "Root after cold boot" PARTIAL "the phone never went off (same boot id): re-run root --cold-boot"
+				return 1
+			fi
+			prev_bid=$bid
+			bid=$newbid
+			check_cold_boot_root "a start from fully off (root --cold-boot)" || return 1
 		fi
 	fi
 	if [ -n "$prev_bid" ] && [ "$prev_bid" != "$bid" ]; then
@@ -1843,6 +1892,7 @@ cmd_autoboot() {
 				if [ "$newbid" != "$bid" ]; then
 					kv_set autoboot.env verified yes
 					record "Automatic power-on" PASS "$method: booted by itself after power-off with the charger connected"
+					check_cold_boot_root "the automatic power-on (autoboot --test)" || true
 				else
 					record "Automatic power-on" FAIL "the phone never went off (same boot id)"
 				fi
@@ -2289,7 +2339,7 @@ cmd_all() {
 		esac
 	done
 	say ""
-	say "Not part of 'all' (they change things or take hours): root --reboot, commands --live,"
+	say "Not part of 'all' (they change things or take hours): root --reboot, root --cold-boot, commands --live,"
 	say "charge-discover --test, current-sign, usb --live / --reboot-test, autoboot --test,"
 	say "power-log, heat-log. See docs/phase0.md."
 	cmd_report

@@ -8,8 +8,8 @@ log and a hot afternoon. Record the outcome in [`phase0-results.md`](phase0-resu
 must-have row later (plan section 4).
 
 Everything below uses [`tools/phase0/phase0.sh`](../tools/phase0/phase0.sh). It only reads, unless
-an option says it changes something (`--live`, `--test`, `--reboot`, `--reboot-test`,
-`--fastboot`, `power-log start`); those ask for confirmation first, and any value they change is
+an option says it changes something (`--live`, `--test`, `--reboot`, `--cold-boot`,
+`--reboot-test`, `--fastboot`, `power-log start`); those ask for confirmation first, and any value they change is
 restored on exit, Ctrl-C included.
 
 ## 0. Before buying or rooting: a quick survey
@@ -64,6 +64,7 @@ Recommended order: the cheapest ways to rule a phone out come first.
 | 1 | Bootloader | Yes | `info` | Unlock option exists and the bootloader unlocks |
 | 2 | Root | Yes | `root`, then `root --reboot` | `su` works, and still works after a reboot |
 | 3 | Automatic power-on | Yes | `autoboot`, then `autoboot --test` | Boots by itself from fully off when power is connected |
+| 3a | Root after cold boot | Yes | `autoboot --test` (checks it), or `root --cold-boot` | `su` still works after a start from fully off, not only after a reboot |
 | 4 | Charge control | Yes | `charge-discover`, then `charge-discover --test PATH` | Charging stops and restarts from the root shell |
 | 5 | Control commands | Most | `commands`, then `commands --live` | Each command in plan 6.3 tried; working ones noted |
 | 6 | Signal readings | Yes | `signal` | RSRP, RSRQ, SINR, band and PCI readable about once per second |
@@ -71,7 +72,12 @@ Recommended order: the cheapest ways to rule a phone out come first.
 | 8 | Power budget | Yes | `power-log start` ... `power-log pull` | 24 h of tethering under load; battery does not trend down |
 | 9 | Heat | Yes | `heat-log start` ... `heat-log pull` | In the enclosure on a hot afternoon, stays below 45 °C |
 
-Also needed for the device profile (not rows of the plan's table): `current-sign` and `thermal`.
+Row 3a is not in the plan's table; it is required because of the Galaxy S10 problem in 2.2: a
+phone that loses root on a cold power-on would come back from every power cut without charge
+control or recovery actions. Add it to [`phase0-results.md`](phase0-results.md) under "Root".
+
+Also needed for the device profile (not rows of the plan's table): `current-sign`, `thermal` and
+the per-model values in section 2.11.
 
 `report` prints the table at any time and writes `phase0-table.md` in the results folder.
 
@@ -101,6 +107,7 @@ reduced no-root fallback; it is not the target.)
 ```sh
 tools/phase0/phase0.sh root
 tools/phase0/phase0.sh root --reboot     # reboots once to prove root survives
+tools/phase0/phase0.sh root --cold-boot  # powers off; you start it; root is checked again (row 3a)
 ```
 
 Checks `su -c id` returns uid 0 and names the root manager (Magisk / KernelSU / APatch) and
@@ -110,14 +117,24 @@ have root: tap Grant (Forever). Root that worked in two different boots gives **
 If it fails: re-patch the exact firmware's boot image (`init_boot` on phones launched with
 Android 13+), check the root manager app, and grant Shell in its superuser list.
 
-Samsung phones launched with Android 9 (the Galaxy S10 family) have no ramdisk in the boot image:
-Magisk is installed into the recovery partition and root is active only when the phone boots
-through recovery (key combination, or `adb reboot recovery`). A plain reboot, and a cold power-on
-after a power cut, start **without root**, so the Agent would lose charge control and recovery
-commands exactly when it matters. `root` warns about such phones and `root --reboot` (a normal
-reboot) shows the effect. Unless an S10 keeps root through a normal reboot and through the
-automatic power-on, prefer an S20 or S21 (launched with Android 10 / 11: Magisk patches the boot
-image).
+> **Warning: Galaxy S10 family (S10e, S10, S10+, S10 5G; launched with Android 9).** Their boot
+> image has no ramdisk, so Magisk is installed into the **recovery** partition and root is active
+> only when the phone starts through recovery (key combination, or `adb reboot recovery`). A plain
+> reboot, and above all a **cold power-on after a power cut**, start **without root**: the Agent
+> then has no charge control (no 45 °C stop, no charge limit) and no recovery actions, exactly
+> when it matters. `root` warns about these phones (first API level 28 or lower).
+>
+> **Required for every phone, decisive for an S10:** row 3a, root after a cold boot. Run
+> `root --cold-boot` (the script powers the phone off; start it with the power button, a normal
+> start without any key combination) and `autoboot --test` (which also checks root after the
+> automatic power-on). Both must show `su` working. If either shows no root, that phone cannot be
+> used: **prefer a Galaxy S20 or S21** (launched with Android 10 / 11, where Magisk patches the
+> boot image and root survives every kind of start). Plan Appendix A.1 still lists the S10 as one
+> of the safest families; this test overrides that.
+
+`root --cold-boot` records **PASS** for row 3a when `su -c id` returns uid 0 within 60 s of the
+new boot, **FAIL** when it does not (re-run it once to rule out a slow Magisk start), and
+**PARTIAL** when the phone did not come back or never went off.
 
 ### 2.3 Automatic power-on (`autoboot`) - Samsung: do this first
 
@@ -142,8 +159,11 @@ animation and stay off. The phone must boot by itself (plan 4.3):
 
 `--test` shuts the phone down while the cable stays connected, which puts it into charging-only
 mode (the state after power returns), and waits up to 4 minutes for Android to come back. A new
-boot gives **PASS**. Then do the real thing by hand once: unplug, power off, wait 30 s, plug into
-the real port, and record it with `--confirm`. Phase 5 repeats it with a completely empty battery.
+boot gives **PASS**. It then checks that root still works in that boot and records row 3a (root
+after cold boot): an auto-boot that brings the phone up without root is not good enough. Then do
+the real thing by hand once: unplug, power off, wait 30 s, plug into the real port, and record it
+with `--confirm`; right after such a hand test, `root` shows whether root came up too. Phase 5
+repeats it with a completely empty battery.
 
 The `hsm-keepalive` Magisk module does **not** do this; it only keeps the Agent running.
 
@@ -307,6 +327,67 @@ zone.
 If it fails (plan 4.2, 4.5): more shade, a light-coloured box, a small roof, vents with a drip
 edge, screen off, a lower charge limit, then repeat on another hot day.
 
+### 2.11 Per-model values for the device profile
+
+The Agent reads everything that differs per model from its device profile
+([`device-profiles.md`](device-profiles.md)). Record each value below in `phase0-results.md` and
+in the profile; `phase0.sh profile` fills in what it can, the rest is done by hand. Steps marked
+"Agent" need the Agent installed (Phase 1) and are done on the real phone before deployment.
+
+1. **charge_control path.** `charge-discover`, then `charge-discover --test PATH` on each
+   promising `rw` switch until one gives stopped=yes restored=yes. Put that path **first** in
+   `charge_control` with its `on` / `off` values; delete or move down paths that did not stop
+   charging. Note the mode (idle or input suspended). Files listed `ro` cannot work even though
+   root can open them. Agent: with the phone plugged in and charging (battery below the charge
+   limit), send `charging` off from the Dashboard; within a minute `power.charge_control` must name your path,
+   status must leave "charging", and no `error` event with `where: charge_control` may appear
+   (that event means the Agent found the path ineffective and moved on). Send `charging` on and
+   check it charges again.
+2. **current_now unit and sign.** `current-sign` (keep the cable in, unplug and re-plug when
+   told). Copy the result into `current_now` (`unit` `uA` or `mA`, `sign` `1` or `-1`). Agent:
+   the Dashboard's `power.current_ma` must be positive and roughly the charger's current while
+   charging, negative on battery.
+3. **Root after cold boot.** Row 3a (section 2.2): `root --cold-boot` and `autoboot --test` both
+   PASS. Galaxy S10 family: expect FAIL; use an S20 or S21 instead.
+4. **USB tethering command.** `usb --live` (rndis) and, if the router needs it,
+   `usb --live --function ncm`: the interface that gets an IPv4 address (`rndis0`, `ncm0`,
+   `usb0`) gives `usb_function`. If `svc usb setFunctions <fn>` does not bring tethering up, find
+   a command that does (look through `adb shell cmd connectivity help` and
+   `adb shell cmd tethering help` on this build; the Agent has no generic fallback beyond one USB
+   re-enumeration) and put it in `commands.usb_tethering` with `{function}` and `{action}`
+   placeholders
+   ([`device-profiles.md`](device-profiles.md) section 3). Agent: from the Dashboard switch USB
+   tethering off and on; the cmd_result must name the interface and IP, and the router must get
+   internet again with no touch.
+5. **Control commands and templates.** `commands --live`; for every row of `commands.tsv` that
+   failed but has a working alternative, write a `commands.<name>` template. A template must carry
+   the direction (`{enabled}`, `{state}` or `{action}`): one list serves on and off. Test each
+   template on the phone first with the placeholders filled in by hand, as root:
+   `adb shell su -c "<command>"`, once per direction. Agent: run each control from the Dashboard
+   (or the Agent's Status screen) and check the capability map shows it supported.
+6. **network_mode bitmasks.** `commands` saves the phone's help text in
+   `commands-network-mode-help.txt`; `commands --live` reads the current value and writes it back.
+   Check the help says the mask is binary and that
+   `adb shell su -c 'cmd phone get-allowed-network-types-for-users -s 0'` prints names or a
+   binary string. Then try the Agent's built-in masks by hand (table in
+   [`device-profiles.md`](device-profiles.md) section 3), for example
+   `adb shell su -c 'cmd phone set-allowed-network-types-for-users -s 0 1000001000000000000'`
+   for LTE only, confirm with the `get` command and the status bar, and restore with the `auto`
+   mask `11111111101111111111`. Only if this build needs other values, put them in the profile's
+   `network_mode` map (binary strings) or a `network_mode` template. On Android 11 or older there
+   is no such command: a template is the only way, or leave network mode unsupported.
+7. **SoftAp config path (hotspot SSID).** Start the hotspot once
+   (`commands --live` does), then
+   `adb shell su -c 'ls -l /data/misc/apexdata/com.android.wifi/WifiConfigStoreSoftAp.xml /data/misc/wifi/WifiConfigStoreSoftAp.xml /data/misc/wifi/softap.conf'`.
+   The Agent reads the SSID only from `WifiConfigStoreSoftAp.xml` in the first two places (Android
+   11+). If the file is elsewhere, or only the binary `softap.conf` exists (Android 10), note it
+   in the profile `notes`: `tether.hotspot_ssid` stays empty on that phone. Hotspot on Android 10
+   also needs a `commands.hotspot` template (`cmd wifi start-softap` is Android 11+).
+8. **Thermal keywords.** `thermal`; copy the suggested `thermal` lists (lowercase; never `soc` or
+   other `bcl` zones).
+9. **Automatic power-on method.** `autoboot` and `autoboot --test`; write the method that worked
+   in `autoboot.method` / `autoboot.note`.
+
 ## 3. Recording the results
 
 ```sh
@@ -332,6 +413,7 @@ Otherwise decide per row:
 |------------|------------------------|
 | Bootloader, Root | No: choose a different phone |
 | Automatic power-on | Only if another auto-boot method works for this model; otherwise a different phone |
+| Root after cold boot | No (Galaxy S10 family: Magisk lives in recovery): a different phone, preferably a Galaxy S20 or S21 |
 | Charge control | Only if another file works; the built-in limit alone is not enough for months outdoors |
 | Power budget | Usually: better port, cable or powered hub (then repeat) |
 | Heat | Usually: shade and enclosure changes (then repeat) |
@@ -350,3 +432,34 @@ Otherwise decide per row:
 | Network adb (`-s 100.x.y.z:5555`) | Works for everything; commands that cut the network ask first |
 | Several phones | `-s SERIAL` (see `adb devices`) |
 | Output looks wrong | Each run is logged in `results/<...>/log-<command>.txt`; raw data sits next to it |
+
+## 6. After installing the Agent: hardware checklist
+
+The Agent has only been compiled and unit-tested; nothing in it has run on a phone. Before the
+phone goes outside, go through this list on the real phone with the Agent installed and paired
+(Phase 1, [`install.md`](install.md)). Agent log: the app's Log screen, or
+`adb logcat | grep ' HSM/'`. Record failures in `phase0-results.md` and fix them in the profile or
+report them as Agent bugs.
+
+| # | Area | Steps | Pass |
+|---|------|-------|------|
+| 1 | Service start | Reboot. Then `adb shell am force-stop com.hotspotmonitor.agent` and wait 60 s (Magisk keep-alive). Then `adb shell am broadcast -a com.hotspotmonitor.agent.action.START -n com.hotspotmonitor.agent/.service.ControlReceiver --es reason manual`. On Android 14/15 check `adb shell dumpsys activity services com.hotspotmonitor.agent` shows type `location` once location is granted. | Notification and `agent_start` events (`boot`, `restart`, `manual`) arrive each time; exactly one `boot` event per reboot |
+| 2 | Root | Status screen shows the root manager; `adb shell su -c 'command -v timeout'` prints a path. | Magisk / KernelSU auto-grants the Agent; commands time out instead of hanging |
+| 3 | Root setup | Revoke one permission (`adb shell pm revoke com.hotspotmonitor.agent android.permission.READ_PHONE_STATE`), switch location off, restart the Agent. | Permission back, location services back on, `dumpsys deviceidle whitelist` lists the Agent |
+| 4 | Radio | With location on: LTE, NR SA and NR NSA if the SIM gets them; screen off for 10 minutes. | RSRP/RSRQ/SINR/band/PCI keep updating with the screen off; NSA shows the NR leg; neighbours listed |
+| 5 | Internet check | Pull the SIM or switch mobile data off at the router side. | A `connectivity` event with `online: false`, and `online: true` with `down_for_s` once it is back |
+| 6 | Traffic | Download 100 MB through the tether; reboot; download again. | `traffic` counters grow and survive the reboot (no reset to 0 in the month total) |
+| 7 | Tethering | Unplug and replug USB; switch the hotspot on and off from the Dashboard (section 2.11 step 7). | `usb_connected` / `tether_up` events; `tether.usb_function`, interface, IP and clients filled; hotspot SSID shown (Android 11+) |
+| 8 | Power | Section 2.11 steps 1 and 2; let the battery reach the charge limit. | Charging stops at the limit and resumes 10% lower; `power.current_ma` sign right; heat stop works (row 9) |
+| 9 | Thermal | Compare the Dashboard's heat values with `thermal`. | cpu / modem / skin / battery filled with plausible °C (no 90+ °C from a `soc` zone) |
+| 10 | System | Compare Dashboard CPU/memory/top processes with `adb shell top -n 1`; check `boot_count` after a reboot. | Top list and boot reason filled; `boot_count` goes up by one |
+| 11 | Position | GPS fix outdoors; tilt the phone past the `moved` tilt threshold in settings and leave it; then set the Finder baseline. | `moved` event on the tilt; none after the baseline re-reference |
+| 12 | Identity | Device info on the Dashboard. | `imei_tail` shows the last 4 digits (or stays empty: acceptable, note it) |
+| 13 | Controls | Every control of plan 6.3 from the Dashboard (data, airplane, USB tethering, hotspot, network mode, screen, brightness, app disable/force-stop, SMS send, USSD, reboot, power off only if enabled). | Each cmd_result says what happened; the ones that cannot work are marked unsupported in the capability map |
+| 14 | Auto-revert | From the Dashboard switch mobile data off (it cuts the link). | The Agent switches it back on at the deadline, `revert` event; with Keep pressed in time it stays |
+| 15 | Watchdog | Cause a real outage (SIM out or APN broken) for 10 minutes. | Data cycle, then airplane cycle, then a reboot within the limit; `reboot_blocked` once the limit is reached; weekly reboot at the set local time |
+| 16 | Finder | Spot test and speed test; alarm-stream tone; speech; photo; headless volume keys with the screen off. | Score and speed recorded, tone and speech audible, photo attached, key gestures recognised |
+| 17 | Pairing | Pair by QR from the camera app, and by `adb shell "am start -a android.intent.action.VIEW -d '<deep_link>' --ez auto true"` with the screen locked. | Pairs with no tap; token survives a reboot |
+| 18 | Sync | Server asleep (Render free tier cold start), then airplane cycle, then a network loss of 5 minutes. | Reconnects each time; buffered telemetry back-fills; heartbeats keep the Server awake |
+| 19 | SMS | Send an SMS to the phone's number. | `sms_received` event and the SMS list on the Dashboard |
+| 20 | Soak | 24 h with the screen off, tethering under load. | No Agent restarts except planned ones; the notification stays; no unexplained gaps in the telemetry history |

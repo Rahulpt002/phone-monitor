@@ -74,17 +74,18 @@ not end in U, U1 or W, and the software is One UI 7 or older (`phase0.sh info`).
 6. After the flash, follow the Magisk documentation for Samsung (factory reset from stock
    recovery on first root, then boot and open the Magisk app).
 
-Galaxy S10 family (launched with Android 9): there is no ramdisk in the boot image, so Magisk is
-installed into the recovery partition and root is only active when the phone boots through
-recovery. A cold power-on after a power cut then starts without root. Run
-`phase0.sh root --reboot` and `phase0.sh autoboot --test` and check root afterwards; prefer an
-S20 or S21 if the S10 loses root.
+**Warning, Galaxy S10 family (launched with Android 9):** there is no ramdisk in the boot image,
+so Magisk is installed into the recovery partition and root is only active when the phone boots
+through recovery. A cold power-on after a power cut then starts **without root** (no charge
+control, no recovery actions). The root-after-cold-boot test below is required for every phone
+and decides it for an S10; prefer a Galaxy S20 or S21 (docs/phase0.md section 2.2).
 
 **Verify:**
 
 ```sh
-adb shell su -c id                    # uid=0(root). Grant "Shell" in Magisk the first time.
-tools/phase0/phase0.sh root --reboot  # root must survive a reboot
+adb shell su -c id                       # uid=0(root). Grant "Shell" in Magisk the first time.
+tools/phase0/phase0.sh root --reboot     # root must survive a reboot
+tools/phase0/phase0.sh root --cold-boot  # and a start from fully off (you press power)
 ```
 
 ### 2.2 Remove the screen lock and the SIM PIN
@@ -392,8 +393,10 @@ edge.
       `docs/phase0-results.md`).
 - [ ] New battery fitted; no swelling (plan 4.6).
 - [ ] No screen lock, no SIM PIN, no personal accounts, automatic updates off.
-- [ ] Root survives a reboot; the Agent has root permanently.
+- [ ] Root survives a reboot **and a cold power-on** (`root --cold-boot`, and `autoboot --test`
+      shows root after the automatic start); the Agent has root permanently.
 - [ ] Automatic power-on proven (`autoboot --test`, and once by hand with the real cable and port).
+- [ ] The Agent hardware checklist in `docs/phase0.md` section 6 done on this phone.
 - [ ] `hsm-keepalive` installed; log shows "Agent started" after a reboot; a force-stopped Agent
       comes back within a minute.
 - [ ] Device profile matches the phone (Dashboard shows its `profile_id`), charge-control path

@@ -1,5 +1,7 @@
 package com.hotspotmonitor.agent.control
 
+import android.content.Intent
+import android.os.BatteryManager
 import com.hotspotmonitor.agent.core.ActionResult
 import com.hotspotmonitor.agent.core.AgentGraph
 import com.hotspotmonitor.agent.core.ChargeController
@@ -10,9 +12,11 @@ import com.hotspotmonitor.agent.protocol.Severity
 import com.hotspotmonitor.agent.protocol.StopReason
 import com.hotspotmonitor.agent.protocol.jsonObjectOf
 import com.hotspotmonitor.agent.root.ChargeControlPath
-import com.hotspotmonitor.agent.root.shellQuote
+import com.hotspotmonitor.agent.telemetry.PowerMath
+import com.hotspotmonitor.agent.telemetry.stickyIntent
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -25,8 +29,12 @@ import kotlinx.coroutines.sync.withLock
 
 /**
  * Root charge control (plan 4.2, 6.5) through the device profile's charge_control paths: the first
- * path that exists and accepts writes wins. Charging is decided by [ChargePolicy] from three
- * inputs, each set through [setCharging] with its reason:
+ * path that exists, has its owner write bit set and takes its current value written back wins
+ * ([ChargeProbe.choosePath]; root's `[ -w ]` is always true, so it is not used). The first stop
+ * while plugged in and charging is then checked like `phase0.sh charge-discover --test`: if the
+ * battery keeps charging, the path is restored to `on`, skipped from then on (in this process) and
+ * the next candidate takes over. Charging is decided by [ChargePolicy] from three inputs, each set
+ * through [setCharging] with its reason:
  *
  * - HEAT (the watchdog's heat rule) always wins,
  * - MANUAL (the `charging` command) overrides the limit; a manual "on" lasts until the battery is
@@ -51,11 +59,32 @@ class ChargeControllerImpl(private val graph: AgentGraph) : ChargeController {
     private var limitStop = false
     private var lastAutoFailure: Pair<Boolean, Long>? = null
 
+    /** Paths that accepted writes but did not stop charging (cleared when the profile's list changes). */
+    private val ineffective = HashSet<String>()
+
+    /** Path whose stop was seen to work, so it is not checked again. */
+    private var confirmedPath: String? = null
+
+    /** Incremented on every switch write; an effect check is void once another write happened. */
+    private var writeSeq = 0L
+
+    @Volatile
+    private var scope: CoroutineScope? = null
+
     override fun start(scope: CoroutineScope) {
+        this.scope = scope
         scope.launch {
+            var previous: List<ChargeControlPath>? = null
             graph.profiles.profile.map { it.chargeControl }.distinctUntilChanged().collect { candidates ->
                 try {
-                    mutex.withLock { initLocked(candidates) }
+                    mutex.withLock {
+                        if (previous != null && previous != candidates) {
+                            ineffective.clear()
+                            confirmedPath = null
+                        }
+                        previous = candidates
+                        initLocked(candidates)
+                    }
                 } catch (e: CancellationException) {
                     throw e
                 } catch (e: Exception) {
@@ -143,27 +172,14 @@ class ChargeControllerImpl(private val graph: AgentGraph) : ChargeController {
     }
 
     private suspend fun findPath(candidates: List<ChargeControlPath>): ChargeControlPath? {
-        if (candidates.isEmpty()) {
-            probeNote = "the device profile lists no charge_control path"
-            return null
-        }
-        if (!graph.shell.isRooted()) {
+        if (candidates.isNotEmpty() && !graph.shell.isRooted()) {
             probeNote = "root not available"
             return null
         }
-        for (c in candidates) {
-            val quoted = shellQuote(c.path)
-            if (!graph.shell.run("test -e $quoted && test -w $quoted", SHELL_TIMEOUT_MS).ok) continue
-            val current = graph.shell.readFile(c.path)
-            // Writing the value it already has proves the switch accepts writes without changing anything.
-            if (current != null && (current == c.on.trim() || current == c.off.trim())) {
-                if (!graph.shell.writeFile(c.path, current).ok) continue
-            }
-            probeNote = c.note
-            return c
-        }
-        probeNote = "none of the ${candidates.size} charge_control paths exists and accepts writes"
-        return null
+        val choice = ChargeProbe.choosePath(candidates, graph.shell, ineffective, SHELL_TIMEOUT_MS)
+        probeNote = choice.note
+        if (choice.path?.path != confirmedPath) confirmedPath = null
+        return choice.path
     }
 
     private suspend fun readActualLocked() {
@@ -198,7 +214,9 @@ class ChargeControllerImpl(private val graph: AgentGraph) : ChargeController {
             if (failure != null && failure.first == decision.enabled && now - failure.second < AUTO_RETRY_MS) return null
         }
         val value = if (decision.enabled) p.on else p.off
+        val before = if (!decision.enabled && confirmedPath != p.path) batterySample() else null
         val write = graph.shell.writeFile(p.path, value)
+        writeSeq++
         val readBack = graph.shell.readFile(p.path)
         val verified = write.ok && (readBack == null || readBack == value.trim())
         val verb = if (decision.enabled) "resume" else "stop"
@@ -210,6 +228,7 @@ class ChargeControllerImpl(private val graph: AgentGraph) : ChargeController {
             return ActionResult.failure("Could not $verb charging: $detail", method = p.path)
         }
         lastAutoFailure = null
+        if (before != null && ChargeProbe.worthChecking(before)) scheduleEffectCheckLocked(p)
         val previousReason = current.stopReason
         _state.update { it.copy(chargingEnabled = decision.enabled, stopReason = decision.reason, method = p.path) }
         val battery = graph.telemetry.power.value?.percent
@@ -235,6 +254,86 @@ class ChargeControllerImpl(private val graph: AgentGraph) : ChargeController {
     }
 
     private fun decision(): ChargeDecision = ChargePolicy.decide(heatActive, manual, limitStop)
+
+    /**
+     * Watches the battery after [p] was switched off while charging (phase0.sh charge-discover
+     * --test does the same by hand): the first [EFFECT_SETTLE_MS] are ignored while the charger
+     * reacts, then [EFFECT_SAMPLES] readings decide. Void when another write happens meanwhile.
+     */
+    private fun scheduleEffectCheckLocked(p: ChargeControlPath) {
+        val s = scope ?: return
+        val seq = writeSeq
+        // Not cancelled when superseded (this may run inside the previous check): a check whose
+        // write sequence is stale simply does nothing.
+        s.launch {
+            try {
+                delay(EFFECT_SETTLE_MS)
+                val samples = ArrayList<BatterySample>()
+                repeat(EFFECT_SAMPLES) { i ->
+                    if (i > 0) delay(EFFECT_INTERVAL_MS)
+                    samples += batterySample()
+                }
+                mutex.withLock {
+                    if (seq == writeSeq && path == p) onEffectLocked(p, ChargeProbe.judgeEffect(samples), samples)
+                }
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                graph.log.w(TAG, "Charge effect check failed", e)
+            }
+        }
+    }
+
+    private suspend fun onEffectLocked(p: ChargeControlPath, effect: ChargeEffect, samples: List<BatterySample>) {
+        when (effect) {
+            ChargeEffect.STOPPED -> {
+                confirmedPath = p.path
+                graph.log.i(TAG, "Charge control via ${p.path} confirmed: charging stopped")
+            }
+            ChargeEffect.UNKNOWN -> graph.log.i(TAG, "Charge control via ${p.path}: effect not clear yet ($samples)")
+            ChargeEffect.NO_EFFECT -> {
+                ineffective += p.path
+                val restore = graph.shell.writeFile(p.path, p.on)
+                writeSeq++
+                val ma = samples.mapNotNull { it.currentMa }.maxOrNull()
+                val message = "${p.path} accepted '${p.off}' but the battery kept charging" +
+                    (ma?.let { " (up to $it mA)" } ?: "") + "; restored '${p.on}'" +
+                    (if (restore.ok) "" else " (failed: ${restore.summary()})")
+                graph.log.w(TAG, message)
+                path = findPath(graph.profiles.current.chargeControl)
+                probedAtMs = graph.clock.elapsedMs()
+                _state.update { it.copy(chargingEnabled = null) }
+                readActualLocked()
+                val next = path
+                graph.events.emit(
+                    EventKind.ERROR, Severity.WARNING,
+                    "Charge control: $message. " + (next?.let { "Switching to ${it.path}." } ?: "No other charge_control path works."),
+                    jsonObjectOf("where" to "charge_control", "message" to message, "next_path" to next?.path),
+                )
+                if (next != null) applyLocked(automatic = false)
+            }
+        }
+    }
+
+    /** Battery state right now (sticky ACTION_BATTERY_CHANGED and BatteryManager current). */
+    private fun batterySample(): BatterySample {
+        val intent = try {
+            graph.app.stickyIntent(Intent.ACTION_BATTERY_CHANGED)
+        } catch (e: Exception) {
+            null
+        }
+        val raw = try {
+            graph.app.getSystemService(BatteryManager::class.java)
+                ?.getIntProperty(BatteryManager.BATTERY_PROPERTY_CURRENT_NOW)?.toLong()
+        } catch (e: Exception) {
+            null
+        }
+        return BatterySample(
+            plugged = intent?.getIntExtra(BatteryManager.EXTRA_PLUGGED, -1)?.takeIf { it >= 0 }?.let { it != 0 },
+            status = intent?.getIntExtra(BatteryManager.EXTRA_STATUS, -1)?.takeIf { it >= 0 },
+            currentMa = PowerMath.currentMa(raw, graph.profiles.current.currentNow),
+        )
+    }
 
     private fun parseSwitch(p: ChargeControlPath, value: String?): Boolean? = when (value) {
         null -> null
@@ -285,5 +384,10 @@ class ChargeControllerImpl(private val graph: AgentGraph) : ChargeController {
 
         /** After a failed automatic switch, wait this long before the limit rule tries again. */
         private const val AUTO_RETRY_MS = 60_000L
+
+        /** Effect check after a stop: ignore the charger's reaction time, then sample. */
+        private const val EFFECT_SETTLE_MS = 10_000L
+        private const val EFFECT_SAMPLES = 6
+        private const val EFFECT_INTERVAL_MS = 4_000L
     }
 }

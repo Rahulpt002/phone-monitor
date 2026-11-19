@@ -10,9 +10,11 @@ The root keep-alive from plan 6.1: after every boot it
    optionally switches the Developer option "Stay awake" off,
 3. starts the Agent with `am broadcast -a com.hotspotmonitor.agent.action.START -n
    com.hotspotmonitor.agent/.service.ControlReceiver`, falling back to
-   `am start-foreground-service -n com.hotspotmonitor.agent/.service.AgentService`,
+   `am start-foreground-service -n com.hotspotmonitor.agent/.service.AgentService`; both carry
+   `--es reason boot` so the Agent's `agent_start` event says why it started,
 4. every 60 s checks `pidof com.hotspotmonitor.agent` (and every 5 minutes that `AgentService`
-   itself runs) and restarts it when it is gone.
+   itself runs) and restarts it when it is gone (`--es reason restart`; the Action button
+   sends `--es reason manual`).
 
 **It does not make the phone power on by itself after a power cut.** That is a separate,
 per-model change (plan 4.3 and Appendix A): `fastboot oem off-mode-charge 0` on phones with

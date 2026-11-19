@@ -21,7 +21,7 @@ if agent_running && service_running; then
 	exit 0
 fi
 echo "Starting the Agent..."
-if start_agent; then
+if start_agent manual; then
 	echo "The Agent is running."
 	log_msg "action: Agent started"
 else
