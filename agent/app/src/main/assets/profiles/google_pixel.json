@@ -1,0 +1,29 @@
+{
+  "id": "google_pixel",
+  "name": "Google Pixel",
+  "match": { "manufacturer": ["google"], "model_regex": "^Pixel" },
+  "charge_control": [
+    { "path": "/sys/devices/platform/google,charger/charge_stop_level", "on": "100", "off": "5", "note": "Google charger driver (Pixel 6 and later): charging stops at or above this level, so a value below the current charge stops it and 100 restores normal charging. USB keeps powering the phone." },
+    { "path": "/sys/devices/platform/soc/soc:google,charger/charge_stop_level", "on": "100", "off": "5", "note": "Same driver on Snapdragon Pixels (Pixel 4 and 5). Uncertain for older Pixels: verify." },
+    { "path": "/sys/class/power_supply/battery/charging_enabled", "on": "1", "off": "0", "note": "Older Snapdragon Pixels (Pixel 2 and 3 era). Uncertain: verify." },
+    { "path": "/sys/class/power_supply/battery/input_suspend", "on": "0", "off": "1", "note": "Snapdragon Pixels: suspends USB input, so the phone runs from the battery while charging is stopped." }
+  ],
+  "current_now": { "unit": "uA", "sign": 1 },
+  "usb_function": "rndis",
+  "autoboot": {
+    "method": "fastboot_oem_off_mode_charge",
+    "note": "After unlocking the bootloader: adb reboot bootloader; fastboot oem off-mode-charge 0; fastboot reboot (or tools/phase0/phase0.sh autoboot --fastboot). Prove it with tools/phase0/phase0.sh autoboot --test."
+  },
+  "thermal": {
+    "cpu": ["big", "mid", "little", "cpu", "tsens"],
+    "modem": ["modem", "mdm", "pa_therm", "pa-therm", "mmw"],
+    "skin": ["skin", "quiet", "neutral", "xo_therm", "xo-therm"],
+    "battery": ["battery"]
+  },
+  "notes": [
+    "Matches every Google phone whose model starts with 'Pixel'. Generations differ: run Phase 0 on the exact model and narrow this profile (or add a model-specific one) once the charge path is proven.",
+    "current_now sign and unit differ between Pixel generations: measure with tools/phase0/phase0.sh current-sign before relying on the net-current alert.",
+    "USB tethering may use ncm instead of rndis on newer Pixels and Android versions: tools/phase0/phase0.sh usb shows the interface (rndis0 or ncm0). Set usb_function to match.",
+    "Recent Pixels offer a built-in 80% charging limit (Settings, Battery, Charging optimization; availability depends on model and Android version), a useful base layer under the Agent's lower limit."
+  ]
+}

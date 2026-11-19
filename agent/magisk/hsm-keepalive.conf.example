@@ -1,0 +1,22 @@
+# Optional settings for the hsm-keepalive module. To use them:
+#   adb push hsm-keepalive.conf.example /data/local/tmp/
+#   adb shell su -c 'cp /data/local/tmp/hsm-keepalive.conf.example /data/adb/hsm-keepalive.conf'
+# then edit /data/adb/hsm-keepalive.conf and reboot (or run action.sh). Plain shell assignments only.
+
+# Seconds between checks that the Agent is running (minimum 15).
+CHECK_INTERVAL=60
+
+# 1 = switch the Developer option "Stay awake" (screen on while charging) off at boot.
+STAY_AWAKE_OFF=1
+
+# 1 = grant SEND_SMS, RECEIVE_SMS and READ_SMS (carrier SMS alerts, plan 6.2). 0 = leave them.
+GRANT_SMS=1
+
+# More runtime permissions to grant, space-separated (full names).
+EXTRA_PERMISSIONS=""
+
+# More app-ops to set to "allow", space-separated (for example SYSTEM_ALERT_WINDOW).
+EXTRA_APPOPS=""
+
+# Rotate /data/local/tmp/hsm-keepalive.log above this size (KiB).
+LOG_MAX_KB=256

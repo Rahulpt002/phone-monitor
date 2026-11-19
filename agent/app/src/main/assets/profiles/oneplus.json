@@ -1,0 +1,27 @@
+{
+  "id": "oneplus",
+  "name": "OnePlus (all models)",
+  "match": { "manufacturer": ["oneplus"] },
+  "charge_control": [
+    { "path": "/sys/class/power_supply/battery/op_disable_charge", "on": "0", "off": "1", "note": "OnePlus 5 to 8 (OxygenOS msm kernels): 1 stops charging." },
+    { "path": "/sys/class/oplus_chg/battery/mmi_charging_enable", "on": "1", "off": "0", "note": "OnePlus 9 and later (OPLUS kernels shared with Oppo and Realme): 0 stops charging. Uncertain: verify." },
+    { "path": "/sys/class/power_supply/battery/input_suspend", "on": "0", "off": "1", "note": "Qualcomm: suspends USB input, so the phone runs from the battery while charging is stopped." }
+  ],
+  "current_now": { "unit": "uA", "sign": 1 },
+  "usb_function": "rndis",
+  "autoboot": {
+    "method": "unknown",
+    "note": "Try 'fastboot oem off-mode-charge 0' after unlocking (tools/phase0/phase0.sh autoboot --fastboot); not every OnePlus bootloader accepts it. Otherwise a root change that makes the charging-only mode boot Android. Prove it with tools/phase0/phase0.sh autoboot --test."
+  },
+  "thermal": {
+    "cpu": ["cpu", "tsens"],
+    "modem": ["modem", "mdm", "pa_therm", "pa-therm", "mmw"],
+    "skin": ["skin", "xo_therm", "xo-therm", "quiet", "msm_therm", "msm-therm"],
+    "battery": ["battery"]
+  },
+  "notes": [
+    "Manufacturer-only match: any OnePlus phone without a more specific profile. Narrow it with model_regex (Build.MODEL, for example '^IN20' for the OnePlus 8 family) once a phone passes Phase 0.",
+    "current_now on OnePlus kernels is often negative while charging and sometimes in milliamps: measure with tools/phase0/phase0.sh current-sign and set unit and sign.",
+    "OnePlus kernels may also expose battery protection limits in Settings; use them as a base layer under the Agent's limit."
+  ]
+}

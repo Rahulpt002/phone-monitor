@@ -1,0 +1,35 @@
+{
+  "id": "samsung_galaxy_s",
+  "name": "Samsung Galaxy S10 / S20 / S21",
+  "match": { "manufacturer": ["samsung"], "model_regex": "^SM-G9[789]" },
+  "charge_control": [
+    { "path": "/sys/class/power_supply/battery/batt_slate_mode", "on": "0", "off": "1", "note": "The switch most often reported to work on Galaxy S10/S20/S21 (ACC project). Stops charging; on most kernels it also cuts USB input power, so the phone runs from the battery until charging resumes." },
+    { "path": "/sys/class/power_supply/battery/input_suspend", "on": "0", "off": "1", "note": "Only on some Snapdragon variants. Uncertain: verify." },
+    { "path": "/sys/class/power_supply/battery/batt_full_capacity", "on": "100", "off": "5", "note": "One UI 'Protect battery' cap in percent: a cap below the current charge pauses charging. Some kernels accept only fixed values (85 or 100) or make it read-only. Uncertain: verify." },
+    { "path": "/sys/class/power_supply/battery/store_mode", "on": "0", "off": "1", "note": "Retail demo mode: pauses charging only above about 70% and resumes near 60%, so it cannot stop charging lower down. Last resort." }
+  ],
+  "current_now": { "unit": "mA", "sign": 1 },
+  "usb_function": "rndis",
+  "autoboot": {
+    "method": "magisk_autoboot",
+    "note": "Samsung has no fastboot, so 'fastboot oem off-mode-charge' does not exist. Needs a root change that makes the charging-only mode (LPM) reboot into Android, for example an auto-boot Magisk module or boot-image patch; on older models, replacing the charging-animation program. Support varies by model: make it the first Phase 0 test (plan Appendix A.2)."
+  },
+  "thermal": {
+    "cpu": ["big", "mid", "little", "cpu", "tsens"],
+    "modem": ["modem", "mdm", "pa_therm", "pa-therm", "mmw"],
+    "skin": ["skin", "ap_therm", "ap-therm", "xo_therm", "xo-therm", "quiet"],
+    "battery": ["battery"]
+  },
+  "notes": [
+    "Matches SM-G97x (S10e, S10, S10+, S10 5G), SM-G98x (S20, S20+, S20 Ultra) and SM-G99x (S21, S21+, S21 Ultra, and the S21 FE SM-G990x).",
+    "Buying (plan Appendix A.1): models ending in U, U1 or W (USA, Canada) cannot be bootloader-unlocked. The software must be One UI 7 (Android 15) or older: One UI 8 removed unlocking. The S21 FE received One UI 8, so check it was never updated.",
+    "Unlocking and rooting use Download mode and Odin, not fastboot. Unlocking wipes the phone and trips Knox permanently.",
+    "Galaxy S10 family (launched with Android 9): the boot image has no ramdisk, so Magisk is installed to the recovery partition and root is only active when the phone boots through recovery. A cold power-on after a power cut starts without root. Prove 'Root survives a reboot' and automatic power-on together on an S10, or prefer an S20/S21 (launched with Android 10/11, Magisk in the boot image).",
+    "current_now: Samsung's battery driver reports milliamps, positive while charging. Confirm with tools/phase0/phase0.sh current-sign.",
+    "Use 'Protect battery' (85%, or 80 to 95% on One UI 7) as the base charge limit; the root switch above takes it down to 50-60% (plan 4.2).",
+    "One UI stops background apps aggressively: set the Agent to Unrestricted battery use and add it to 'Never sleeping apps' (the hsm-keepalive module also whitelists it from Doze).",
+    "Dial *#0011# for the service menu (band and signal) to cross-check the Signal Finder.",
+    "Once Android runs, a USB-C hub with HDMI and a mouse can stand in for a dead screen; Download mode does not output video.",
+    "Keep automatic updates off: an update to One UI 8 was reported to re-lock unlocked phones."
+  ]
+}

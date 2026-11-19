@@ -1,0 +1,6 @@
+id=hsm-keepalive
+name=HSM Agent keep-alive
+version=1.0.0
+versionCode=1
+author=hotspot-monitor
+description=Grants the Hotspot Monitor Agent its permissions at boot, starts its foreground service and restarts it if it stops (plan 6.1). Does not provide automatic power-on.

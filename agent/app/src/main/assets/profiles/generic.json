@@ -1,0 +1,34 @@
+{
+  "id": "generic",
+  "name": "Generic rooted Android phone (fallback)",
+  "match": {},
+  "charge_control": [
+    { "path": "/sys/class/power_supply/battery/input_suspend", "on": "0", "off": "1", "note": "Qualcomm kernels: suspends USB input, so the phone runs from the battery while charging is stopped. USB data (tethering) stays up." },
+    { "path": "/sys/class/power_supply/battery/charging_enabled", "on": "1", "off": "0", "note": "Older Qualcomm kernels: stops charging while USB keeps powering the phone. On some kernels it exists but has no effect: verify." },
+    { "path": "/sys/class/power_supply/battery/battery_charging_enabled", "on": "1", "off": "0", "note": "Older Qualcomm kernels: same as charging_enabled. Verify." },
+    { "path": "/sys/class/power_supply/battery/batt_slate_mode", "on": "0", "off": "1", "note": "Samsung (models without their own profile): stops charging; on most kernels it also cuts USB input power." },
+    { "path": "/sys/class/power_supply/battery/op_disable_charge", "on": "0", "off": "1", "note": "OnePlus 5 to 8 (OxygenOS msm kernels)." },
+    { "path": "/sys/class/oplus_chg/battery/mmi_charging_enable", "on": "1", "off": "0", "note": "OPLUS kernels (OnePlus 9 and later, Oppo, Realme). Uncertain: verify." },
+    { "path": "/sys/devices/platform/charger/bypass_charger", "on": "0", "off": "1", "note": "MediaTek: bypass (idle) mode on some kernels. Uncertain: verify." },
+    { "path": "/proc/mtk_battery_cmd/current_cmd", "on": "0 0", "off": "0 1", "note": "MediaTek: the value contains a space (the ACC project writes it as 0::1). Uncertain: verify." },
+    { "path": "/sys/class/power_supply/battery/charge_control_end_threshold", "on": "100", "off": "5", "note": "Linux standard end threshold, rare on Android: a value below the current charge stops charging. Uncertain: verify." }
+  ],
+  "current_now": { "unit": "uA", "sign": 1 },
+  "usb_function": "rndis",
+  "autoboot": {
+    "method": "unknown",
+    "note": "Prove automatic power-on in Phase 0 (plan 4.3): phones with fastboot try 'fastboot oem off-mode-charge 0'; others need a root change that makes the charging-only mode boot Android. Check with tools/phase0/phase0.sh autoboot --test."
+  },
+  "thermal": {
+    "cpu": ["cpu", "tsens", "big", "mid", "little", "apc"],
+    "modem": ["modem", "mdm", "pa_therm", "pa-therm", "mmw", "btsmdpa"],
+    "skin": ["skin", "xo_therm", "xo-therm", "quiet", "msm_therm", "msm-therm", "mtktsap"],
+    "battery": ["battery"]
+  },
+  "notes": [
+    "Fallback used when no other profile matches this phone. Write a device profile for any phone that goes outdoors (docs/device-profiles.md).",
+    "Charge-control candidates are tried in order and the first existing, writable path wins, so an ineffective file earlier in the list can hide a working one. Prove the path with tools/phase0/phase0.sh charge-discover --test and put it first in a device profile.",
+    "current_now assumes microamps, positive while charging (Android's BatteryManager convention). Many Qualcomm kernels report the opposite sign and some report milliamps: measure with tools/phase0/phase0.sh current-sign.",
+    "Thermal keywords leave out Qualcomm battery-current-limit zones such as 'soc', 'vbat' and 'ibat': they report charge level, voltage or current, not temperature."
+  ]
+}

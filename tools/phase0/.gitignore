@@ -1,0 +1,4 @@
+# Phase 0 results hold device identifiers, cell IDs and logs: keep them local.
+results/
+# Built module zip (tools/phase0/build-magisk-module.sh)
+dist/
