@@ -24,7 +24,9 @@ export type EventKind =
   | 'charging_stopped' // data: { reason: 'limit' | 'heat' | 'manual' }
   | 'charging_resumed'
   | 'radio_rest' // data: { seconds }
-  | 'watchdog_action' // data: { rule, action, step, outcome }
+  // data: { rule: 'internet'|'tether'|'schedule', action: 'data_cycle'|'airplane_cycle'|'reboot'|'usb_tethering',
+  //         step, outcome: 'recovered'|'still_down'|'rebooting'|'blocked' }
+  | 'watchdog_action'
   | 'command' // Agent-local command executed (local UI / watchdog); data: CommandRecord-like
   | 'revert' // auto-revert happened; data: { command_id, name }
   | 'moved' // tilt or location changed; data: { tilt_change_deg, moved_m, lat, lon }

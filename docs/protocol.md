@@ -20,7 +20,7 @@ The TypeScript types in [`shared/src/`](../shared/src) are the source of truth. 
 - One JSON object per WebSocket text frame, with a `t` field naming the type.
 - Receivers **ignore unknown `t` values and unknown fields**.
 - Keys are `snake_case`. Timestamps are ISO-8601 UTC with milliseconds (`2026-11-19T10:15:00.000Z`).
-- Values the phone cannot read are omitted or `null`, never invented.
+- Values the phone cannot read are omitted or `null`, never invented. **A missing field and `null` mean the same thing** for every receiver: the Kotlin Agent omits nulls (`explicitNulls = false`), including fields the TypeScript types mark as required `T | null` (for example `CmdAckMsg.reason`, `CmdResultMsg.error`, `FinderLive.score`, speed values).
 - Kotlin: `Json { ignoreUnknownKeys = true; explicitNulls = false; encodeDefaults = true; classDiscriminator = "t" }`, one `@Serializable @SerialName("<t>")` class per message. Telemetry groups are flattened at the top level of the `telemetry` message (`{"t":"telemetry","seq":1,"ts":"...","tier":"fast","radio":{...},"net":{...}}`).
 - Max frame size 512 KiB. Command output is truncated to 64 KiB.
 
@@ -28,7 +28,7 @@ The TypeScript types in [`shared/src/`](../shared/src) are the source of truth. 
 
 1. An admin presses **Pair phone** in the Dashboard → `POST /api/pair/codes` → an 8-character one-time code (valid 15 min) plus:
    - `deep_link`: `hsm://pair?server=<url-encoded https base URL>&code=<code>`, shown as a QR code. Any camera app that reads QR codes opens it in the Agent.
-   - `adb_command`: `adb shell am start -a android.intent.action.VIEW -d '<deep_link>'` for a phone with a dead screen.
+   - `adb_command`: `adb shell "am start -a android.intent.action.VIEW -d '<deep_link>' --ez auto true"` for a phone with a dead screen. The inner command is quoted so the phone's shell does not split the link at `&`; `--ez auto true` pairs without a tap (add `--ez replace true` to replace an existing pairing).
    - The Agent's local UI also has a manual form (server URL + code).
 2. The Agent calls `POST <server>/api/pair {code, device: DeviceInfo}` → `{device_id, device_token, ws_url, server_url}`.
 3. The Agent stores `device_token` encrypted with an Android Keystore key and never shows or logs it. The Server keeps only its SHA-256.
@@ -39,7 +39,8 @@ The TypeScript types in [`shared/src/`](../shared/src) are the source of truth. 
 ### 3.1 Connect
 
 - The Agent opens `wss://<host>/ws/agent` with `Authorization: Bearer <device_token>`. A bad token gets `{"t":"error","code":"unauthorized"}`, then close code **4001**. On 4001 the Agent stops reconnecting until it is paired again.
-- If the same device connects twice, the Server closes the older socket with `{"t":"error","code":"replaced"}`, then code **4002**.
+- If the same device connects twice, the Server closes the older socket with `{"t":"error","code":"replaced"}`, then code **4002**. The Agent ignores close events from sockets it has already abandoned; on 4002 for its current socket it waits 30 s before reconnecting (two phones sharing one token would otherwise fight in a tight loop).
+- Close **1001** (Server shutting down or redeploying) is a normal reconnect with backoff.
 - The Server's first message is **`hello`**: `server_time`, `device_id`, `settings`, `settings_version`, `rates`.
   - **Clock offset** = `server_time − local now` at receipt. The Agent uses it for command expiry (3.5). It does not change the phone's clock.
   - If `settings_version` differs from the version the Agent last applied, the Agent applies and persists the new settings and emits `settings_applied` event.
@@ -53,7 +54,7 @@ These message types are **buffered**: `telemetry`, `event`, `finder_spot`, `find
 
 1. The Agent first inserts each one into its local outbox (Room). The table's autoincrement id becomes `seq`.
 2. A single sender coroutine drains the outbox **in `seq` order**. A message produced while connected leaves right away. A backlog leaves in `batch` messages of at most 200 items.
-3. After storing, the Server replies `{"t":"ack","seq":N}`, meaning every message with seq ≤ N is stored. The Agent then deletes those rows.
+3. After storing, the Server replies `{"t":"ack","seq":N}`, meaning every message with seq ≤ N is stored. The Agent then deletes those rows. The Server acks **every** buffered message it has processed, including ones it drops (semantically invalid, or referring to an unknown command id or spot, for example reports left in the outbox from before a re-pairing). Otherwise one bad row would block the outbox head forever.
 4. Unacked rows are re-sent after a reconnect, so the Server must handle duplicates:
    - telemetry: unique `(device_id, tier, ts)` → INSERT OR IGNORE
    - events: unique `event.id`
@@ -152,6 +153,7 @@ score  = round1(100 * (w_sinr*n_sinr + w_rsrp*n_rsrp + w_rsrq*n_rsrq))   // miss
 | Code | Meaning |
 |------|---------|
 | 1000 | normal |
+| 1001 | Server going away (shutdown or redeploy): reconnect with backoff |
 | 4001 | unauthorized (bad or revoked token / session) |
 | 4002 | replaced by a newer connection of the same device |
 | 4003 | protocol error (bad message) |

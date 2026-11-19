@@ -57,6 +57,13 @@ describe('settings', () => {
     expect(s.alerts.quota_steps_pct).toEqual([50]);
     expect(DEFAULT_SETTINGS.watchdog.charge_limit_pct).toBe(60);
   });
+  it('replaces profile_override as a whole', () => {
+    const a = mergeSettings(DEFAULT_SETTINGS, { profile_override: { charge: { paths: ['x'] }, notes: 'n' } });
+    const b = mergeSettings(a, { profile_override: { charge: { paths: ['y'] } } });
+    expect(b.profile_override).toEqual({ charge: { paths: ['y'] } });
+    expect(mergeSettings(b, { watchdog: { enabled: false } }).profile_override).toEqual({ charge: { paths: ['y'] } });
+    expect(mergeSettings(b, { profile_override: null }).profile_override).toBeNull();
+  });
 });
 
 describe('ranking (plan 7.3)', () => {

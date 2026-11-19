@@ -207,7 +207,10 @@ export const DEFAULT_SETTINGS: Settings = {
 type Plain = Record<string, unknown>;
 const isPlain = (v: unknown): v is Plain => typeof v === 'object' && v !== null && !Array.isArray(v);
 
-/** Deep-merge a partial settings object over a base (arrays and scalars replace). */
+/**
+ * Deep-merge a partial settings object over a base (arrays and scalars replace).
+ * `profile_override` is replaced as a whole, so a PUT can remove keys from it in one step.
+ */
 export function mergeSettings(base: Settings, patch: unknown): Settings {
   const merge = (b: unknown, p: unknown): unknown => {
     if (!isPlain(b) || !isPlain(p)) return p === undefined ? b : p;
@@ -215,5 +218,10 @@ export function mergeSettings(base: Settings, patch: unknown): Settings {
     for (const [k, v] of Object.entries(p)) out[k] = k in b ? merge(b[k], v) : v;
     return out;
   };
-  return merge(base, patch) as Settings;
+  const merged = merge(base, patch) as Settings;
+  if (isPlain(patch) && 'profile_override' in patch) {
+    const po = patch.profile_override;
+    merged.profile_override = po === undefined ? base.profile_override : (po as Settings['profile_override']);
+  }
+  return merged;
 }

@@ -77,7 +77,8 @@ export interface TotpSetupResponse {
 // --- users (admin) ----------------------------------------------------------------------------
 // GET /users -> UserInfo[]
 // POST /users { username, password, role } -> UserInfo
-// PATCH /users/:id { role?, password? } -> UserInfo
+// PATCH /users/:id { role?, password?, reset_totp? } -> UserInfo
+//   reset_totp: true clears that user's authenticator and revokes their sessions (lost phone).
 // DELETE /users/:id -> 204 (cannot delete the last admin or yourself)
 export interface CreateUserRequest {
   username: string;
@@ -95,7 +96,12 @@ export interface PairCodeResponse {
   expires_at: string;
   /** Opened by the phone's camera (QR) or by ADB; the Agent's PairActivity handles it. */
   deep_link: string; // hsm://pair?server=<urlencoded base url>&code=<code>
-  adb_command: string; // adb shell am start -a android.intent.action.VIEW -d '<deep_link>'
+  /**
+   * For a phone with a dead screen. The inner command is quoted so the phone's shell does not
+   * split the link at '&'; `--ez auto true` makes PairActivity pair without a tap:
+   * adb shell "am start -a android.intent.action.VIEW -d '<deep_link>' --ez auto true"
+   */
+  adb_command: string;
 }
 
 // POST /pair (public, rate-limited) - called by the Agent
