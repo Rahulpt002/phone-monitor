@@ -1,5 +1,9 @@
 /**
- * REST API (plan section 8.3). All endpoints are JSON over HTTPS. Except where noted, they need
+ * REST API (plan section 8.3). All endpoints are JSON over HTTPS and live under the `/api` prefix
+ * (POST /api/auth/login, GET /api/device, ...) so the Server can also serve the Dashboard SPA from
+ * the same origin. The paths in the comments below omit the prefix. Exceptions: GET /healthz (root,
+ * for the hosting health check) and the WebSockets at /ws/agent and /ws/dashboard.
+ * Except where noted, endpoints need
  * `Authorization: Bearer <session token>` from /auth/login (+ /auth/totp).
  * Errors: HTTP status + `{ error: ApiErrorCode, message: string }`.
  *
@@ -103,6 +107,8 @@ export interface PairResponse {
   device_id: string;
   device_token: string; // shown once; Server stores only its SHA-256
   ws_url: string; // wss://<host>/ws/agent
+  /** Absolute base URL of the Server (no trailing slash), e.g. https://hsm.onrender.com */
+  server_url: string;
 }
 
 // --- devices ----------------------------------------------------------------------------------

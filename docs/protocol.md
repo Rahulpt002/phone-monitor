@@ -15,6 +15,8 @@ The TypeScript types in [`shared/src/`](../shared/src) are the source of truth. 
 
 ## 1. General rules
 
+- REST endpoints live under `/api` (for example `POST /api/auth/login`). The paths in `api.ts` comments omit that prefix. Exceptions are `GET /healthz` and the two WebSockets, `/ws/agent` and `/ws/dashboard`.
+
 - One JSON object per WebSocket text frame, with a `t` field naming the type.
 - Receivers **ignore unknown `t` values and unknown fields**.
 - Keys are `snake_case`. Timestamps are ISO-8601 UTC with milliseconds (`2026-11-19T10:15:00.000Z`).
@@ -24,11 +26,11 @@ The TypeScript types in [`shared/src/`](../shared/src) are the source of truth. 
 
 ## 2. Pairing (plan section 10)
 
-1. An admin presses **Pair phone** in the Dashboard → `POST /pair/codes` → an 8-character one-time code (valid 15 min) plus:
+1. An admin presses **Pair phone** in the Dashboard → `POST /api/pair/codes` → an 8-character one-time code (valid 15 min) plus:
    - `deep_link`: `hsm://pair?server=<url-encoded https base URL>&code=<code>`, shown as a QR code. Any camera app that reads QR codes opens it in the Agent.
    - `adb_command`: `adb shell am start -a android.intent.action.VIEW -d '<deep_link>'` for a phone with a dead screen.
    - The Agent's local UI also has a manual form (server URL + code).
-2. The Agent calls `POST <server>/pair {code, device: DeviceInfo}` → `{device_id, device_token, ws_url}`.
+2. The Agent calls `POST <server>/api/pair {code, device: DeviceInfo}` → `{device_id, device_token, ws_url, server_url}`.
 3. The Agent stores `device_token` encrypted with an Android Keystore key and never shows or logs it. The Server keeps only its SHA-256.
 4. Unpairing (`DELETE /devices/:id`) revokes the token. The Agent then receives close code 4001 and shows "Not paired".
 
