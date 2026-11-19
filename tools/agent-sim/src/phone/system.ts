@@ -127,12 +127,13 @@ export class SystemModel {
     return Math.round(this.storageFree);
   }
 
-  info(nowMs: number, util: number, versions: { agent: string; android: string }, rebootsInWindow: number): SystemInfo {
+  /** `nowMs` is the phone clock; `toIso` puts a phone-clock instant on the wire (SimClock.serverIso). */
+  info(nowMs: number, util: number, versions: { agent: string; android: string }, rebootsInWindow: number, toIso: (phoneMs: number) => string): SystemInfo {
     return {
       uptime_s: Math.max(0, Math.floor((nowMs - this.bootAt) / 1000)),
       boot_count: this.bootCount,
       boot_reason: this.bootReason,
-      last_boot_at: new Date(this.bootAt).toISOString(),
+      last_boot_at: toIso(this.bootAt),
       cpu_load: this.cpuLoad,
       ram_total_mb: this.ramTotal,
       ram_avail_mb: this.ramAvailMb,
@@ -183,13 +184,14 @@ export class PositionModel {
     return { pitch: this.cur.pitch, roll: this.cur.roll, azimuth: this.cur.azimuth };
   }
 
-  info(): PositionInfo {
+  /** `toIso` puts the phone-clock fix time on the wire (SimClock.serverIso). */
+  info(toIso: (phoneMs: number) => string = (ms) => new Date(ms).toISOString()): PositionInfo {
     const { tilt, moved } = this.drift();
     return {
       lat: Math.round(this.cur.lat * 1e6) / 1e6,
       lon: Math.round(this.cur.lon * 1e6) / 1e6,
       acc_m: this.rng.int(6, 15),
-      fix_at: new Date(this.lastFixAt).toISOString(),
+      fix_at: toIso(this.lastFixAt),
       pitch_deg: round1(this.cur.pitch),
       roll_deg: round1(this.cur.roll),
       azimuth_deg: Math.round(this.cur.azimuth),

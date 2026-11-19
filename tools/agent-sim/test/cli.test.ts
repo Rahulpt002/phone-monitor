@@ -15,7 +15,7 @@ const env = { cwd: '/work', defaultStateFile: '/pkg/.sim-state.json', colorDefau
 describe('parseCli', () => {
   it('applies defaults', () => {
     const o = parseCli([], env);
-    expect(o).toMatchObject({ server: null, stateFile: '/pkg/.sim-state.json', speed: 1, scenarios: [], color: true, keepLink: false });
+    expect(o).toMatchObject({ server: null, stateFile: '/pkg/.sim-state.json', speed: 1, scenarios: [], color: true, keepLink: false, exitOnReplaced: false });
   });
 
   it('parses every option, with repeated and comma-separated scenarios', () => {
@@ -31,6 +31,7 @@ describe('parseCli', () => {
         '--keep-link',
         '--no-color',
         '--verbose',
+        '--exit-on-replaced',
       ],
       env,
     );
@@ -40,7 +41,7 @@ describe('parseCli', () => {
     expect(o.speed).toBe(30);
     expect(o.scenarios).toEqual(['overheat', 'cell-flap', 'weak-power']);
     expect(o.offlineForS).toBe(120);
-    expect(o.keepLink && o.verbose && !o.color).toBe(true);
+    expect(o.keepLink && o.verbose && !o.color && o.exitOnReplaced).toBe(true);
   });
 
   it('rejects bad input', () => {

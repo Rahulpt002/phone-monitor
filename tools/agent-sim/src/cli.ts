@@ -20,6 +20,8 @@ export interface CliOptions {
   seed: number | null;
   persistOutbox: boolean;
   clockSkewS: number;
+  /** Exit (code 4) on close code 4002 instead of waiting 30 s and reconnecting like the real Agent. */
+  exitOnReplaced: boolean;
   help: boolean;
 }
 
@@ -56,6 +58,7 @@ export function parseCli(argv: readonly string[], env: CliEnv): CliOptions {
     seed: null,
     persistOutbox: false,
     clockSkewS: 0,
+    exitOnReplaced: false,
     help: false,
   };
   for (let i = 0; i < argv.length; i++) {
@@ -131,6 +134,9 @@ export function parseCli(argv: readonly string[], env: CliEnv): CliOptions {
       case '--clock-skew':
         o.clockSkewS = number(flag, value(), () => true, 'a number of seconds');
         break;
+      case '--exit-on-replaced':
+        o.exitOnReplaced = true;
+        break;
       case '--help':
       case '-h':
         o.help = true;
@@ -179,7 +185,10 @@ ${scen}
   --keep-link           commands that would cut the phone's link (mobile data off, airplane on,
                         network mode) leave it up, so the auto-revert probe confirms the change
   --persist-outbox      keep unacked messages in the state file across restarts
-  --clock-skew <s>      phone clock offset in seconds (tests the Server's clock-offset handling)
+  --clock-skew <s>      phone clock offset in seconds; like the real Agent, everything sent is
+                        stamped with the clock corrected by the offset learned from hello
+  --exit-on-replaced    exit (code 4) when another connection with this token replaces this one
+                        (close 4002) instead of waiting 30 s and reconnecting like the real Agent
   --seed <n>            reproducible random values
 
 Output:

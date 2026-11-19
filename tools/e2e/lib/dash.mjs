@@ -12,6 +12,8 @@ export class DashClient {
     this.msgs = [];
     this.ws = null;
     this.user = null;
+    /** The `auth_failed` message when the Server refused the session (e.g. totp_enrollment_required). */
+    this.authFailed = null;
     this.closed = null;
     this.pingTimer = null;
   }
@@ -45,7 +47,10 @@ export class DashClient {
     });
     this.send({ t: 'auth', token });
     const ok = await this.waitFor((m) => m.t === 'auth_ok' || m.t === 'auth_failed', { timeout, label: 'auth reply' });
-    if (ok.t !== 'auth_ok') throw new AssertionError(`${this.label}: auth failed: ${ok.message}`);
+    if (ok.t !== 'auth_ok') {
+      this.authFailed = ok;
+      throw new AssertionError(`${this.label}: auth failed: ${ok.message}`);
+    }
     this.user = ok.user;
     // Protocol 5.5: the client pings every 25 s.
     this.pingTimer = setInterval(() => this.send({ t: 'ping' }), 25_000);

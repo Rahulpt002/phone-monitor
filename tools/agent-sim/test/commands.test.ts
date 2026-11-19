@@ -88,6 +88,59 @@ describe('command checks (docs/protocol.md 3.5)', () => {
     expect(outboxOf(agent, 'cmd_result').filter((m) => m.id === c.id)).toHaveLength(1);
   });
 
+  /** The Server stored and acknowledged everything buffered so far. */
+  const serverAckedAll = (a: Agent) => {
+    a.outbox.takeFrames();
+    a.outbox.ack(a.outbox.lastSeq);
+    expect(a.outbox.size).toBe(0);
+  };
+
+  it('a re-sent cmd whose report was already delivered is not run again; its latest report is sent again', async () => {
+    // The Server re-sends a 'sent' command without an ack after a reconnect (half-open socket).
+    const c = cmd('send_sms', { to: '+15550001111', body: 'hi' });
+    const { result } = await run(agent, c, 3000);
+    expect(result).toMatchObject({ ok: true });
+    expect(outboxOf(agent, 'sms')).toHaveLength(1);
+    serverAckedAll(agent);
+
+    agent.handleServerMessage({ ...c });
+    await vi.advanceTimersByTimeAsync(3000);
+    expect(outboxOf(agent, 'sms')).toHaveLength(0); // not executed a second time
+    expect(outboxOf(agent, 'cmd_ack')).toHaveLength(0);
+    const again = outboxOf(agent, 'cmd_result');
+    expect(again).toHaveLength(1);
+    const { seq: _a, ...first } = result;
+    const { seq: _b, ...copy } = again[0];
+    expect(copy).toEqual(first); // the same report (same ts), under a new seq
+
+    // Another copy while that report is still queued adds nothing: the outbox delivers it.
+    agent.handleServerMessage({ ...c });
+    await vi.advanceTimersByTimeAsync(1000);
+    expect(outboxOf(agent, 'cmd_result')).toHaveLength(1);
+  });
+
+  it('a re-sent cmd that is still running re-sends its cmd_ack and still runs once', async () => {
+    const c = cmd('finder_spot_test', { name: 'dup', duration_s: 20 });
+    agent.handleServerMessage(c);
+    await vi.advanceTimersByTimeAsync(1000);
+    expect(ackOf(agent, c.id)).toMatchObject({ accepted: true });
+    serverAckedAll(agent);
+    agent.handleServerMessage({ ...c });
+    expect(outboxOf(agent, 'cmd_ack')).toEqual([expect.objectContaining({ id: c.id, accepted: true })]);
+    await vi.advanceTimersByTimeAsync(25_000);
+    expect(outboxOf(agent, 'cmd_result').filter((m) => m.id === c.id)).toHaveLength(1);
+    expect(agent.finder.list().filter((s) => s.name === 'dup')).toHaveLength(1);
+  });
+
+  it('a re-sent cmd that was rejected re-sends the rejection', async () => {
+    const c = cmd('brightness', { level: 999 });
+    expect((await run(agent, c, 500)).ack).toMatchObject({ accepted: false, reason: 'invalid_args' });
+    serverAckedAll(agent);
+    agent.handleServerMessage({ ...c });
+    expect(outboxOf(agent, 'cmd_ack')).toEqual([expect.objectContaining({ id: c.id, accepted: false, reason: 'invalid_args' })]);
+    expect(outboxOf(agent, 'cmd_result')).toHaveLength(0);
+  });
+
   it('enforces the reboot limit across reboots and reports reboot_blocked', async () => {
     const before = agent.phone.system.bootCount;
     for (let i = 0; i < 3; i++) {
@@ -159,6 +212,20 @@ describe('command effects and outputs', () => {
     expect(bad.output).toContain('inaccessible or not found');
   });
 
+  it('hotspot applies a new password without writing it to the log (CommandSpec.secret_args)', async () => {
+    const lines: string[] = [];
+    const spy = vi.spyOn(agent.log, 'info').mockImplementation((_tag: string, msg: string) => void lines.push(msg));
+    const secret = 'sim-secret-pass-123';
+    const { ack, result } = await run(agent, cmd('hotspot', { enabled: true, ssid: 'E2E-AP', password: secret }), 4000);
+    spy.mockRestore();
+    expect(ack.accepted).toBe(true);
+    expect(result.output).toBe('hotspot on: SSID "E2E-AP", WPA2, new password set');
+    expect(agent.phone.flags.hotspot).toBe(true);
+    expect(lines.some((l) => l.includes('"password":"<redacted>"'))).toBe(true);
+    expect(lines.join('\n')).not.toContain(secret);
+    expect(JSON.stringify(agent.outbox.peek())).not.toContain(secret);
+  });
+
   it('ussd returns the carrier reply', async () => {
     const { result } = await run(agent, cmd('ussd', { code: '*121#' }));
     expect(result.ok).toBe(true);
@@ -221,8 +288,18 @@ describe('command effects and outputs', () => {
     await run(agent, off, 2000);
     await run(agent, cmd('mobile_data', { enabled: true }), 2000);
     expect(agent.reverts.size).toBe(0);
-    expect(outboxOf(agent, 'cmd_revert')[0]).toMatchObject({ id: off.id, state: 'reverted', detail: expect.stringContaining('superseded') });
+    expect(outboxOf(agent, 'cmd_revert')[0]).toMatchObject({ id: off.id, state: 'kept', detail: expect.stringContaining('Superseded by a newer') });
     expect(events(agent, 'revert')).toHaveLength(0);
+  });
+
+  it('a newer change that arms its own revert inherits the earlier undo (Kotlin parity)', async () => {
+    const t1 = cmd('usb_tethering', { enabled: false }, { revert_after_s: 120, revert_confirm: 'agent_link' });
+    await run(agent, t1, 2000);
+    const t2 = cmd('usb_tethering', { enabled: true, function: 'ncm' }, { revert_after_s: 120, revert_confirm: 'agent_link' });
+    await run(agent, t2, 2000);
+    expect(outboxOf(agent, 'cmd_revert')[0]).toMatchObject({ id: t1.id, state: 'kept' });
+    expect(agent.reverts.size).toBe(1);
+    expect(agent.reverts.get(t2.id)?.undo).toEqual(expect.objectContaining({ name: 'usb_tethering', args: expect.objectContaining({ enabled: true }) }));
   });
 
   it('capability_probe and refresh send the static tier', async () => {
@@ -266,5 +343,69 @@ describe('command effects and outputs', () => {
     await run(agent, cmd('finder_set_baseline', { spot_id: b!.id }), 1000);
     expect(agent.finder.list().filter((s) => s.baseline).map((s) => s.name)).toEqual(['B']);
     expect((await run(agent, cmd('finder_set_baseline', { spot_id: 's_missing' }), 1000)).result).toMatchObject({ ok: false });
+  });
+});
+
+describe('timestamps use the offset-corrected clock (Kotlin Clock.isoNow, ARCHITECTURE.md "Timestamps")', () => {
+  let agent: Agent;
+  /** Server time: the real clock in these tests. */
+  const nearServer = (iso: string, what: string, slackMs = 5000) => {
+    expect(typeof iso, what).toBe('string');
+    expect(Math.abs(Date.parse(iso) - Date.now()), `${what} = ${iso}`).toBeLessThan(slackMs);
+  };
+  afterEach(async () => {
+    await agent.stop();
+    vi.useRealTimers();
+  });
+
+  for (const skewS of [300, -300]) {
+    it(`a phone clock ${skewS > 0 ? '5 min fast' : '5 min slow'} still stamps ts, at and revert_deadline in server time`, async () => {
+      vi.useFakeTimers();
+      agent = makeAgent({ clockSkewS: skewS });
+      agent.handleServerMessage(helloMsg({ settings: quickSettings({ commands: { allow_power_off: false } }) }));
+      expect(Math.round(agent.currentSettings().offsetMs / 1000)).toBe(-skewS);
+
+      for (const t of outboxOf(agent, 'telemetry')) nearServer(t.ts, `telemetry ${t.tier} ts`);
+      const slow = outboxOf(agent, 'telemetry').find((m) => m.tier === 'slow');
+      expect(Math.abs(Date.parse(slow.system.last_boot_at) + slow.system.uptime_s * 1000 - Date.parse(slow.ts))).toBeLessThan(2000);
+      nearServer(slow.position.fix_at, 'position.fix_at', 90_000);
+      for (const e of outboxOf(agent, 'event')) nearServer(e.event.ts, `event ${e.event.kind} ts`);
+
+      const off = cmd('mobile_data', { enabled: false }, { revert_after_s: 120, revert_confirm: 'agent_link' });
+      const { ack, result } = await run(agent, off, 2000);
+      nearServer(ack.ts, 'cmd_ack.ts');
+      nearServer(result.ts, 'cmd_result.ts');
+      nearServer(result.revert_deadline, 'revert_deadline', 120_000 + 5000);
+      expect(Date.parse(result.revert_deadline) - Date.now()).toBeGreaterThan(115_000);
+      await vi.advanceTimersByTimeAsync(120_000);
+      const rev = outboxOf(agent, 'cmd_revert').find((m) => m.id === off.id);
+      expect(rev.state).toBe('reverted');
+      nearServer(rev.ts, 'cmd_revert.ts');
+
+      await run(agent, cmd('send_sms', { to: '121', body: 'BAL' }), 3000);
+      await vi.advanceTimersByTimeAsync(10_000);
+      for (const m of outboxOf(agent, 'sms')) nearServer(m.sms.at, `sms ${m.sms.direction} at`, 15_000);
+      const rx = outboxOf(agent, 'event').find((m) => m.event.kind === 'sms_received');
+      nearServer(rx.event.data.at, 'sms_received data.at', 15_000);
+
+      await run(agent, cmd('finder_spot_test', { name: 'clock', duration_s: 5 }), 7000);
+      const spot = outboxOf(agent, 'finder_spot')[0].spot;
+      nearServer(spot.created_at, 'finder_spot.created_at', 15_000);
+      await run(agent, cmd('speed_test', { spot_id: spot.id }), 120_000);
+      const withSpeed = outboxOf(agent, 'finder_spot').map((m) => m.spot).find((s) => s.id === spot.id && s.speed.length > 0);
+      nearServer(withSpeed.speed[0].at, 'speed session at', 130_000);
+      for (const r of withSpeed.speed[0].runs) nearServer(r.at, 'speed run at', 130_000);
+      nearServer(agent.finder.live().ts, 'finder_live ts');
+    });
+  }
+
+  it('the internet_down_since stamp is converted to server time too', async () => {
+    vi.useFakeTimers();
+    agent = makeAgent({ clockSkewS: 600 });
+    agent.handleServerMessage(helloMsg());
+    agent.phone.flags.probeFailSim = true; // internet check failing
+    agent.phone.net.downSince = agent.clock.now() - 60_000; // a minute ago on the phone's clock
+    const since = agent.phone.fastGroups().net.internet_down_since as string;
+    expect(Math.abs(Date.parse(since) - (Date.now() - 60_000))).toBeLessThan(2000);
   });
 });

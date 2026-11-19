@@ -145,15 +145,15 @@ describe('RevertManager (plan 6.4 rule 1)', () => {
     expect(rec.undone).toEqual(['c_1']);
   });
 
-  it('supersede: a restoring command reports the earlier change as reverted, quietly and without undo', () => {
+  it('supersede: a newer command reports the earlier change as kept, quietly and without undo (Kotlin parity)', () => {
     const rec = recorder();
     const m = new RevertManager(rec.host);
     m.arm(armed('c_off', 'agent_link'));
-    m.supersede('data', 'c_on', false);
-    expect(rec.reports).toEqual([{ id: 'c_off', state: 'reverted', detail: 'superseded by c_on', quiet: true }]);
+    expect(m.supersede('data', 'c_on', 'Mobile data').map((r) => r.command_id)).toEqual(['c_off']);
+    expect(rec.reports).toEqual([{ id: 'c_off', state: 'kept', detail: 'Superseded by a newer Mobile data command (c_on)', quiet: true }]);
     expect(rec.undone).toEqual([]);
     m.arm(armed('c_off2', 'agent_link'));
-    m.supersede('airplane', 'c_x', false);
+    expect(m.supersede('airplane', 'c_x', 'Airplane mode')).toEqual([]);
     expect(m.size).toBe(1);
   });
 });

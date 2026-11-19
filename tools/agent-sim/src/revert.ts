@@ -138,17 +138,19 @@ export class RevertManager {
   }
 
   /**
-   * A newer command changes the same state. If the newer one restores the state (it arms no
-   * revert itself) the earlier change counts as reverted; otherwise the newer command carries on
-   * the change and the earlier one is reported as kept. No undo runs and no alert is raised.
+   * A newer command changes the same state (like the Kotlin Agent's supersedeLocked): every earlier
+   * armed revert on it is reported `kept` ("Superseded by a newer <label> command (<id>)"), with no
+   * undo and no `revert` event. Returns the superseded entries, oldest first, so a newer command
+   * that arms a revert itself can inherit the earliest undo: an unconfirmed chain still returns to
+   * the last state that worked.
    */
-  supersede(target: string | undefined, byCommandId: string, continuesChange: boolean): void {
-    if (!target) return;
-    for (const e of [...this.entries.values()]) {
-      if (REVERT_TARGET[e.r.name] === target && e.r.command_id !== byCommandId) {
-        this.resolve(e, continuesChange ? 'kept' : 'reverted', `superseded by ${byCommandId}`, true);
-      }
-    }
+  supersede(target: string | undefined, byCommandId: string, byLabel: string): ArmedRevert[] {
+    if (!target) return [];
+    const doomed = [...this.entries.values()]
+      .filter((e) => REVERT_TARGET[e.r.name] === target && e.r.command_id !== byCommandId)
+      .sort((a, b) => a.r.applied_at - b.r.applied_at);
+    for (const e of doomed) this.resolve(e, 'kept', `Superseded by a newer ${byLabel} command (${byCommandId})`, true);
+    return doomed.map((e) => e.r);
   }
 
   dispose(): void {

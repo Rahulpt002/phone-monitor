@@ -88,7 +88,7 @@ export class Finder {
     const cell = phone.radio.serving;
     const run = this.running;
     return {
-      ts: clock.iso(),
+      ts: clock.serverIso(),
       mode: this.mode,
       score: phone.score,
       score_raw: phone.rawScore,
@@ -164,7 +164,7 @@ export class Finder {
     const spot: FinderSpot = {
       id: newId('s_'),
       name: opts.name,
-      created_at: clock.iso(startedAt),
+      created_at: clock.serverIso(startedAt),
       duration_s: durationS,
       lat: pos.lat ?? null,
       lon: pos.lon ?? null,
@@ -211,7 +211,7 @@ export class Finder {
     try {
       for (let i = 0; i < runsWanted; i++) {
         run.label = `Speed test run ${i + 1}/${runsWanted}`;
-        const at = clock.iso();
+        const at = clock.serverIso();
         await new Promise<void>((resolve) => setTimeout(resolve, clock.realMs(SPEED_RUN_S)));
         if (gen !== this.generation) throw new FinderAbortedError();
         runs.push(phone.internetOk ? this.measureRun(at, settings.speed_bytes) : { down_mbps: null, up_mbps: null, ping_ms: null, jitter_ms: null, bytes: 0, at });
@@ -225,7 +225,7 @@ export class Finder {
     };
     const hour = hourOfDay(startedAt);
     const session: SpeedSession = {
-      at: clock.iso(startedAt),
+      at: clock.serverIso(startedAt),
       peak_hour: hour >= 20 && hour < 22,
       runs,
       down_mbps: pick('down_mbps'),

@@ -364,7 +364,7 @@ export class Phone {
         networkMode: this.flags.networkMode,
         hour,
       }),
-      net: this.net.info(this.internetOk, congestion(hour), this.radioOn && this.flags.dataEnabled, (ms) => this.clock.iso(ms)),
+      net: this.net.info(this.internetOk, congestion(hour), this.radioOn && this.flags.dataEnabled, (ms) => this.clock.serverIso(ms)),
     };
   }
 
@@ -373,10 +373,10 @@ export class Phone {
     return {
       power: this.power.info(this.heat.battery, this.profile.charge_control[0]?.path ?? null, this.chargeLimitPct),
       heat: this.heat.info(this.rng, this.flags.radioResting),
-      system: this.system.info(now, this.utilisation(), { agent: AGENT_VERSION, android: '13' }, rebootsInWindow),
+      system: this.system.info(now, this.utilisation(), { agent: AGENT_VERSION, android: '13' }, rebootsInWindow, (ms) => this.clock.serverIso(ms)),
       tether: this.tetherInfo(),
       traffic: this.net.traffic(this.tetherIf),
-      position: this.position.info(),
+      position: this.position.info((ms) => this.clock.serverIso(ms)),
     };
   }
 

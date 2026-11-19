@@ -2,6 +2,9 @@ import { createServer } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { afterEach, describe, expect, it } from 'vitest';
 import type { Agent, AgentExitReason } from '../src/agent.js';
+import { Connection, type CloseInfo } from '../src/connection.js';
+import { Logger } from '../src/log.js';
+import { Random } from '../src/rng.js';
 import { StateStore } from '../src/state.js';
 import { expectSameShape, FakeServer, fixture, helloMsg, makeAgent, quickSettings, type Json } from './helpers.js';
 
@@ -224,9 +227,52 @@ describe('Agent against an in-process server', () => {
     expect(agent.phone.flags.dataEnabled).toBe(true);
   }, 15_000);
 
-  it('stops on 4002 (replaced by another connection)', async () => {
+  it('on 4002 (replaced) waits the replaced backoff, not the normal one, then reconnects (docs/protocol.md 3.1)', async () => {
     server = await FakeServer.start();
-    agent = makeAgent({ wsUrl: server.url });
+    agent = makeAgent({ wsUrl: server.url, replacedBackoffMs: 1500 });
+    let exited: AgentExitReason | null = null;
+    agent.once('exit', (r: AgentExitReason) => (exited = r));
+    agent.start();
+    const conn = await server.connection(0);
+    await conn.waitFor((m) => m.t === 'heartbeat');
+    conn.send({ t: 'error', code: 'replaced', message: 'newer connection' });
+    conn.ws.close(4002, 'replaced');
+    const closedAt = Date.now();
+    await sleep(1000);
+    // The ordinary backoff here is 100..400 ms; a replaced Agent must not come back that fast.
+    expect(server.conns).toHaveLength(1);
+    const second = await server.connection(1, 5000);
+    expect(Date.now() - closedAt).toBeGreaterThanOrEqual(1400);
+    await second.waitFor((m) => m.t === 'heartbeat');
+    expect(exited).toBeNull();
+    expect(agent.isStopped).toBe(false);
+  }, 15_000);
+
+  it('a link that comes back during the 4002 wait does not cut it short (Kotlin wakeOnNetwork = false)', async () => {
+    server = await FakeServer.start();
+    const conn = new Connection({ url: server.url, token: 'good-token', log: Logger.silent(), rng: new Random(1), backoffBaseMs: 50, replacedBackoffMs: 1200 });
+    const closes: number[] = [];
+    conn.on('close', (i: CloseInfo) => closes.push(i.code));
+    try {
+      conn.setEnabled(true);
+      const first = await server.connection(0);
+      first.ws.close(4002, 'replaced');
+      await first.waitClosed();
+      await sleep(100);
+      expect(closes).toEqual([4002]);
+      conn.setEnabled(false); // link down ...
+      conn.setEnabled(true); // ... and back: the Android network callback
+      await sleep(600);
+      expect(server.conns).toHaveLength(1);
+      await server.connection(1, 3000);
+    } finally {
+      conn.stop();
+    }
+  }, 15_000);
+
+  it('with exitOnReplaced (--exit-on-replaced) it stops on 4002 instead', async () => {
+    server = await FakeServer.start();
+    agent = makeAgent({ wsUrl: server.url, exitOnReplaced: true });
     const exited = exitOf(agent);
     agent.start();
     const conn = await server.connection(0);
@@ -236,6 +282,21 @@ describe('Agent against an in-process server', () => {
     expect(await exited).toBe('replaced');
     await sleep(600);
     expect(server.conns).toHaveLength(1);
+  }, 15_000);
+
+  it('with the phone clock 5 min fast, heartbeat and telemetry are stamped in server time after hello', async () => {
+    server = await FakeServer.start();
+    agent = makeAgent({ wsUrl: server.url, clockSkewS: 300 });
+    agent.start();
+    const conn = await server.connection(0);
+    const hb = await conn.waitFor((m) => m.t === 'heartbeat');
+    const fast = await conn.waitFor((m) => m.t === 'telemetry' && m.tier === 'fast');
+    const slow = await conn.waitFor((m) => m.t === 'telemetry' && m.tier === 'slow');
+    for (const [what, ts] of [['heartbeat.ts', hb.ts], ['fast.ts', fast.ts], ['slow.ts', slow.ts]]) {
+      expect(Math.abs(Date.parse(ts) - Date.now()), what).toBeLessThan(5000);
+    }
+    // last_boot_at is "now minus uptime" on the corrected clock, like Kotlin's SystemCollector.
+    expect(Math.abs(Date.parse(slow.system.last_boot_at) + slow.system.uptime_s * 1000 - Date.parse(slow.ts))).toBeLessThan(2000);
   }, 15_000);
 
   it('reconnects with backoff when the server drops the socket, and re-sends unacked rows', async () => {

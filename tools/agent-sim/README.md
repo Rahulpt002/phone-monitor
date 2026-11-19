@@ -17,17 +17,19 @@ cell congestion and heat.
    npm run dev:web           # http://localhost:5173 (proxies /api and /ws to 8080)
    ```
 
-2. Create a pairing code. In the Dashboard, open **Settings > Pair phone**. With the API, log in
-   as admin and call `POST /api/pair/codes`:
+2. Create a pairing code. In the Dashboard, sign in, enroll TOTP (required for every account,
+   plan 10) and open **Settings > Pair phone**. With the API, the admin must have enrolled TOTP
+   already (a session without it gets `403 totp_enrollment_required` here). Log in, finish the
+   TOTP step with a current code from the authenticator, and call `POST /api/pair/codes`:
 
    ```sh
-   TOKEN=$(curl -s localhost:8080/api/auth/login -H 'content-type: application/json' \
-     -d '{"username":"admin","password":"<ADMIN_PASSWORD>"}' | jq -r .token)
+   PENDING=$(curl -s localhost:8080/api/auth/login -H 'content-type: application/json' \
+     -d '{"username":"admin","password":"<ADMIN_PASSWORD>"}' | jq -r .pending_token)
+   TOKEN=$(curl -s localhost:8080/api/auth/totp -H 'content-type: application/json' \
+     -d "{\"pending_token\":\"$PENDING\",\"code\":\"<6-digit code>\"}" | jq -r .token)
    curl -s -X POST localhost:8080/api/pair/codes -H "authorization: Bearer $TOKEN" \
      -H 'content-type: application/json' -d '{"name":"Simulator"}' | jq -r .code
    ```
-
-   An admin with TOTP enabled gets `totp_required` from the login call; finish it with `POST /api/auth/totp`.
 
 3. Pair the simulator and run it (from the repo root):
 
@@ -70,13 +72,14 @@ state file each.
 | `--offline-for <s>` | Once, `--offline-after` seconds (default 20) after the first `hello`, drops the link for `s` seconds. Telemetry keeps buffering, then the simulator reconnects and back-fills in `batch` frames. |
 | `--keep-link` | Commands that would cut the phone's own link (mobile data off, airplane on, network mode) leave the socket up. The auto-revert probe then succeeds and the change is **kept**. |
 | `--persist-outbox` | Keep unacked messages in the state file across restarts, like the real Agent's Room outbox. |
-| `--clock-skew <s>` | Phone clock offset. Checks that the Server copes with a wrong phone clock (command expiry uses the offset from `hello`). |
+| `--clock-skew <s>` | Phone clock offset. Like the real Agent (`Clock.isoNow`), the simulator learns the Server's offset from `hello` and stamps every `ts`, `at` and `revert_deadline` it sends with the corrected clock, and uses it for command expiry. The phone's own clock (shell `date`, local-time decisions) stays skewed. |
+| `--exit-on-replaced` | Exit with code 4 on close code 4002 instead of waiting 30 s and reconnecting like the real Agent. |
 | `--seed <n>` | Reproducible random values. Ids stay unique. |
 | `--verbose`, `-v` | Also log every frame, ack, probe and heartbeat. |
 | `--no-color` | Plain output. Colour is also off when stdout is not a terminal or `NO_COLOR` is set. |
 
 Exit codes: 0 normal or `power_off`, 1 error, 2 bad arguments or not paired, 3 token rejected (4001),
-4 replaced by another connection (4002).
+4 replaced by another connection (4002, only with `--exit-on-replaced`).
 
 ## Scenarios
 
@@ -120,7 +123,9 @@ Every command in `shared/src/commands.ts` is handled. The checks run in protocol
 6. `busy`. A conflicting command or a watchdog step holds the radio, system or Finder.
 
 `cmd_ack`, `cmd_result`, `cmd_revert` and events all go through the outbox, so they survive a
-dropped link. A duplicate `cmd` id is ignored.
+dropped link. A duplicate `cmd` id is never run twice. The Server re-sends a command it has no
+`cmd_ack` for after a reconnect, so the simulator queues that command's latest report (`cmd_ack`
+or `cmd_result`, same content and `ts`) again, unless that report is still in the outbox anyway.
 
 | Command | Simulated effect / output |
 |---------|---------------------------|
@@ -159,7 +164,12 @@ dropped link. A duplicate `cmd` id is ignored.
   to 60 s with jitter, and the backoff resets after 60 s connected. When the link comes back, the
   Agent reconnects at once, like Android's network-available callback. A WebSocket ping goes out
   every 20 s. On close code 4001 (or HTTP 401/403 on the upgrade) the simulator stops, tells you to
-  pair again and removes the dead token. On 4002 it stops so two copies do not keep replacing each other.
+  pair again and removes the dead token. On 4002 (replaced by another connection with the same token)
+  it waits 30 s before reconnecting, like the Kotlin Agent, and a returning link does not cut that
+  wait short. `--exit-on-replaced` makes it exit instead.
+- **Clock.** Every `ts` / `at` / `revert_deadline` is phone clock + the offset from `hello`
+  (`last_boot_at`, `fix_at` and `internet_down_since` are converted the same way), so a phone with a
+  wrong clock (`--clock-skew`) still looks live to the Server.
 - **Settings.** `hello` and `settings` are applied when the version changes. The simulator persists
   them, emits `settings_applied`, and reports the version in `heartbeat.settings_version`.
 
@@ -192,5 +202,7 @@ The tests cover these areas:
 - The auto-revert state machine, with fake timers.
 - Watchdog rules and score smoothing.
 - The whole client against an in-process `ws` server: hello, drain, heartbeat, settings push,
-  mirror, `--offline-for` back-fill, link-cutting revert, `--keep-link`, 4001, 4002, reconnect with
-  re-send, and simulated reboot.
+  mirror, `--offline-for` back-fill, link-cutting revert, `--keep-link`, 4001, 4002 (30 s wait, or
+  exit with `--exit-on-replaced`), reconnect with re-send, simulated reboot, and offset-corrected
+  timestamps with `--clock-skew`.
+- Duplicate `cmd` ids: never run twice, latest report re-sent.

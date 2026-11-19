@@ -89,8 +89,15 @@ installExitHandlers(procs, () => procs.stopAll());
 
 // --- shared state ------------------------------------------------------------------------------
 
-const ADMIN = { username: 'admin', password: `e2e-admin-${randomBytes(9).toString('base64url')}` };
-const VIEWER = { username: 'e2e-viewer', password: `e2e-viewer-${randomBytes(9).toString('base64url')}` };
+const secretPassword = (prefix) => `${prefix}-${randomBytes(9).toString('base64url')}`;
+const ADMIN = { username: 'admin', password: secretPassword('e2e-admin') };
+const VIEWER = { username: 'e2e-viewer', password: secretPassword('e2e-viewer') };
+/** Created, promoted, reset and deleted by the users-reauth scenario. */
+const TEMP_USER = { username: 'e2e-temp', password: secretPassword('e2e-temp') };
+/** Enrolls TOTP through the Dashboard UI on its first sign-in (dashboard-ui scenario). */
+const VIEWER_UI = { username: 'e2e-viewer-ui', password: secretPassword('e2e-viewer-ui') };
+/** Package and activity-alias of the Agent's ADB-only pairing entry (docs/protocol.md 2). */
+const ADB_PAIR_COMPONENT = 'com.hotspotmonitor.agent/.ui.AdbPair';
 const SIM_STATE = join(WORK, 'sim-state.json');
 
 const S = {
@@ -100,7 +107,8 @@ const S = {
   server: null,
   token: null, // admin session (with TOTP)
   auth: null, // Authenticator for the admin
-  viewerToken: null,
+  viewerToken: null, // viewer session (with TOTP)
+  viewerAuth: null, // Authenticator for the viewer
   deviceId: null,
   pairCode: null,
   dash: null, // admin Dashboard socket
@@ -302,6 +310,77 @@ async function putSettings(patch) {
   return expectStatus(r, 200, 'PUT /api/settings');
 }
 
+/** Asserts a 401 reauth_required answer (wrong or missing password for a re-authenticated action). */
+function expectReauth(res, what) {
+  eq(res.status, 401, `${what}: status`);
+  eq(res.body?.error, 'reauth_required', `${what}: error`);
+}
+
+/**
+ * A session whose user has no TOTP may only enroll (plan 10, shared/src/api.ts MeResponse):
+ * GET /auth/me and GET /config work; every other read, and the dashboard socket, answers
+ * totp_enrollment_required (socket: auth_failed + close 4001). Only routes that every role may
+ * use once enrolled are probed, so the answer cannot be a role check.
+ */
+async function expectEnrollmentOnly(token, who) {
+  const o = { token };
+  eq((await api().get('/api/auth/me', o)).status, 200, `${who}: GET /api/auth/me`);
+  eq((await api().get('/api/config', o)).status, 200, `${who}: GET /api/config`);
+  const dev = S.deviceId ? `?device_id=${S.deviceId}` : '';
+  for (const path of ['/api/devices', `/api/device${dev}`, `/api/settings${dev}`, '/api/alerts', `/api/events${dev}`, `/api/commands${dev}`]) {
+    const r = await api().get(path, o);
+    eq(r.status, 403, `${who}: GET ${path} status`);
+    eq(r.body?.error, 'totp_enrollment_required', `${who}: GET ${path} error`);
+  }
+  const sock = new DashClient(`${S.wsBase}/ws/dashboard`, `${who} socket`);
+  try {
+    const err = await sock.connect(token).then(
+      () => null,
+      (e) => e,
+    );
+    check(err, `${who}: the dashboard socket accepted a session without TOTP`);
+    eq(sock.authFailed?.message, 'totp_enrollment_required', `${who}: dashboard socket auth_failed message`);
+    await waitFor(() => sock.closed, { timeout: 3000, label: `${who} socket close` });
+    eq(sock.closed.code, 4001, `${who}: dashboard socket close code`);
+  } finally {
+    sock.close();
+  }
+}
+
+/** Creates an enrolled user through the API; returns { id, token, auth }. */
+async function createEnrolledUser(user, role) {
+  const created = expectStatus(await api().post('/api/users', { ...user, role, reauth_password: ADMIN.password }, adminOpts()), 201, `POST /api/users ${user.username}`);
+  const login = expectStatus(await api().post('/api/auth/login', user), 200, `${user.username} login`);
+  eq(login.totp_required, false, `${user.username}: first login (no TOTP yet) gives an enrollment-only session`);
+  const setup = expectStatus(await api().post('/api/auth/totp/setup', undefined, { token: login.token }), 200, `${user.username} TOTP setup`);
+  const auth = new Authenticator(setup.secret);
+  expectStatus(await api().post('/api/auth/totp/enable', { code: await auth.nextCode() }, { token: login.token }), 200, `${user.username} TOTP enable`);
+  return { id: created.id, token: login.token, auth };
+}
+
+/**
+ * commands.args as stored in the Server's database, read with node:sqlite (read-only, the Server
+ * keeps running). Returns { skipped } when this Node has no node:sqlite or the file cannot be read.
+ */
+async function storedCommandArgs(id) {
+  let sqlite;
+  try {
+    sqlite = await import('node:sqlite');
+  } catch {
+    return { skipped: 'node:sqlite is not available in this Node version' };
+  }
+  let db;
+  try {
+    db = new sqlite.DatabaseSync(join(WORK, 'e2e.db'), { readOnly: true });
+    const row = db.prepare('SELECT args FROM commands WHERE id = ?').get(id);
+    return { args: row ? String(row.args) : null };
+  } catch (err) {
+    return { skipped: `cannot read ${join(WORK, 'e2e.db')}: ${err.message}` };
+  } finally {
+    db?.close();
+  }
+}
+
 /** The most recent radio.rsrp values the admin socket received (live telemetry and snapshots). */
 function seenRsrp() {
   const vals = [];
@@ -363,7 +442,7 @@ async function main() {
 
   await scenario(
     'auth-totp',
-    'Admin without TOTP is read-only; TOTP enrolled via the API; login with the TOTP step; replayed code refused',
+    'Bootstrap admin without TOTP can only enroll (REST 403 and socket auth_failed totp_enrollment_required); TOTP enrolled via the API; login with the TOTP step; replayed code refused',
     async (notes) => {
       const login1 = expectStatus(await api().post('/api/auth/login', ADMIN), 200, 'first login');
       eq(login1.totp_required, false, 'first login totp_required');
@@ -373,8 +452,8 @@ async function main() {
       const blocked = await api().post('/api/pair/codes', { name: 'x' }, { token: t1 });
       eq(blocked.status, 403, 'pair code without TOTP: status');
       eq(blocked.body?.error, 'totp_enrollment_required', 'pair code without TOTP: error');
-      const reads = await api().get('/api/devices', { token: t1 });
-      eq(reads.status, 200, 'admin without TOTP can still read');
+      // Plan 10: TOTP is mandatory for every role, so reads and the socket are closed too.
+      await expectEnrollmentOnly(t1, 'admin without TOTP');
 
       const setup = expectStatus(await api().post('/api/auth/totp/setup', undefined, { token: t1 }), 200, 'TOTP setup');
       check(/^[A-Z2-7]{16,}$/.test(setup.secret), `TOTP secret is not base32: ${setup.secret}`);
@@ -400,21 +479,23 @@ async function main() {
       const login3 = expectStatus(await api().post('/api/auth/login', ADMIN), 200, 'third login');
       const replay = await api().post('/api/auth/totp', { pending_token: login3.pending_token, code });
       eq(replay.status, 401, 'replayed TOTP code status');
-      notes.push('TOTP enrolled; login needs password + fresh code; a used code is refused');
+      notes.push('without TOTP only /auth/me and /config answer (reads 403, socket auth_failed + 4001); TOTP enrolled; login needs password + fresh code; a used code is refused');
     },
     { required: true },
   );
 
   await scenario(
     'pair-code',
-    'POST /api/pair/codes returns a code, deep link and the quoted adb command with --ez auto true',
+    'POST /api/pair/codes returns a code, deep link and the quoted adb command for the .ui.AdbPair alias with --ez auto true',
     async (notes) => {
       const r = expectStatus(await api().post('/api/pair/codes', { name: 'E2E phone' }, adminOpts()), 201, 'POST /api/pair/codes');
       check(/^[A-Z2-9]{8}$/.test(r.code), `pairing code format: ${r.code}`);
       const ttl = Date.parse(r.expires_at) - Date.now();
       check(ttl > 14 * 60_000 && ttl <= 15 * 60_000 + 5000, `pairing code TTL ${Math.round(ttl / 1000)} s, expected 15 min`);
       eq(r.deep_link, `hsm://pair?server=${encodeURIComponent(S.base)}&code=${r.code}`, 'deep_link');
-      eq(r.adb_command, `adb shell "am start -a android.intent.action.VIEW -d '${r.deep_link}' --ez auto true"`, 'adb_command');
+      // Only the DUMP-guarded activity-alias honours `auto` (pair without a tap); the browsable
+      // hsm://pair link always needs a tap on the phone.
+      eq(r.adb_command, `adb shell "am start -n ${ADB_PAIR_COMPONENT} -a android.intent.action.VIEW -d '${r.deep_link}' --ez auto true"`, 'adb_command');
       S.pairCode = r.code;
       notes.push(`adb_command: ${r.adb_command}`);
     },
@@ -443,7 +524,12 @@ async function main() {
       const m = await procs.waitForOutput(sim, /paired as (d_[A-Za-z0-9_-]+)/, 30_000);
       S.deviceId = m[1];
       await simHello(sim);
-      await S.dash.waitFor((x) => x.t === 'status' && x.device_id === S.deviceId && x.online === true, { timeout: 15_000, label: 'status online' });
+      // A phone's first connection is announced with a full snapshot (watchers of every device do
+      // not know it yet); later reconnects with `status`.
+      await S.dash.waitFor(
+        (x) => (x.t === 'status' && x.device_id === S.deviceId && x.online === true) || (x.t === 'snapshot' && x.device?.device_id === S.deviceId && x.device.online === true),
+        { timeout: 15_000, label: 'status or snapshot online for the new phone' },
+      );
 
       const devs = expectStatus(await api().get('/api/devices', adminOpts()), 200, 'GET /api/devices');
       eq(devs.length, 1, 'paired devices');
@@ -514,6 +600,69 @@ async function main() {
     notes.push(`v${before.version} -> v${res.version}; simulator state settings_version=${st.settings_version}; fast interval ~${median} ms`);
     notes.push("heartbeat.settings_version itself is not exposed by any API; checked via the simulator's settings_applied event and state file");
   });
+
+  await scenario(
+    'settings-audit',
+    "Every PUT /api/settings is recorded as a 'settings_changed' event; a profile_override change (root shell templates) needs the admin's password",
+    async (notes) => {
+      const before = expectStatus(await api().get(`/api/settings?device_id=${S.deviceId}`, adminOpts()), 200, 'GET /api/settings');
+      const settingsEvent = (version, since) =>
+        S.dash.waitFor((x) => x.t === 'event' && x.event?.kind === 'settings_changed' && x.event.data?.version === version, {
+          since,
+          timeout: 10_000,
+          label: `settings_changed event for v${version}`,
+        });
+
+      // An ordinary change needs no password and is audited.
+      let mark = S.dash.mark();
+      const plain = await putSettings({ plan: { quota_gb: 77 } });
+      eq(plain.version, before.version + 1, 'version after a plain PUT');
+      const ev1 = await settingsEvent(plain.version, mark);
+      eq(ev1.device_id, S.deviceId, 'settings_changed device_id');
+      eq(ev1.event.data.user, ADMIN.username, 'settings_changed data.user');
+      eq(ev1.event.data.profile_override_changed, false, 'settings_changed profile_override_changed for a plain change');
+      check(Array.isArray(ev1.event.data.changed) && ev1.event.data.changed.includes('plan.quota_gb'), `settings_changed data.changed: ${short(ev1.event.data.changed)}`);
+
+      // profile_override: refused without the password and with a wrong one; nothing changes.
+      const override = { network_mode: { lte_only: '11', auto: '33' } };
+      const put = (settings, extra = {}) => api().put('/api/settings', { device_id: S.deviceId, settings, ...extra }, adminOpts());
+      expectReauth(await put({ profile_override: override }), 'profile_override without password');
+      expectReauth(await put({ profile_override: override }, { password: 'not-the-password' }), 'profile_override with a wrong password');
+      expectReauth(await put({ profile_override: override, plan: { quota_gb: 78 } }), 'profile_override mixed with another change, without password');
+      const still = expectStatus(await api().get(`/api/settings?device_id=${S.deviceId}`, adminOpts()), 200, 'GET /api/settings');
+      eq(still.version, plain.version, 'a refused profile_override PUT must not bump the version');
+      eq(still.settings.plan.quota_gb, 77, 'a refused PUT must not apply the other keys either');
+
+      mark = S.dash.mark();
+      const withPw = expectStatus(await put({ profile_override: override }, { password: ADMIN.password }), 200, 'profile_override with the password');
+      eq(withPw.version, plain.version + 1, 'version after the profile_override PUT');
+      eq(JSON.stringify(withPw.settings.profile_override), JSON.stringify(override), 'stored profile_override');
+      const ev2 = await settingsEvent(withPw.version, mark);
+      eq(ev2.event.data.profile_override_changed, true, 'settings_changed profile_override_changed');
+      check(ev2.event.data.changed.some((p) => p === 'profile_override' || p.startsWith('profile_override.')), `settings_changed data.changed: ${short(ev2.event.data.changed)}`);
+      // The simulator applies the override: network_mode becomes supported in its capability map.
+      await S.dash.waitFor((x) => x.t === 'telemetry' && x.tier === 'static' && x.capabilities?.network_mode?.supported === true, {
+        since: mark,
+        timeout: 15_000,
+        label: 'static telemetry with network_mode supported (override applied by the simulator)',
+      });
+      const rest = (await events(S.token, '&kind=settings_changed')).filter((e) => e.data?.version === plain.version || e.data?.version === withPw.version);
+      eq(rest.length, 2, 'settings_changed events in GET /api/events');
+
+      // Removing the override is a change to it too.
+      expectReauth(await put({ profile_override: null }), 'clearing profile_override without password');
+      mark = S.dash.mark();
+      const cleared = expectStatus(await put({ profile_override: null }, { password: ADMIN.password }), 200, 'clearing profile_override with the password');
+      eq(cleared.settings.profile_override, null, 'profile_override after clearing');
+      eq((await settingsEvent(cleared.version, mark)).event.data.profile_override_changed, true, 'settings_changed after clearing');
+      await S.dash.waitFor((x) => x.t === 'telemetry' && x.tier === 'static' && x.capabilities?.network_mode?.supported === false, {
+        since: mark,
+        timeout: 15_000,
+        label: 'static telemetry with network_mode unsupported again',
+      });
+      notes.push(`v${before.version} -> v${cleared.version}; profile_override 401 x4 without/with a wrong password, 200 with it; settings_changed ${ev1.event.data.changed.join(',')} / ${ev2.event.data.changed.join(',')}`);
+    },
+  );
 
   await scenario('finder-mirror', 'subscribe finder:true turns the 1 s finder_live mirror on; finder:false turns it off', async (notes) => {
     const mark = S.dash.mark();
@@ -641,16 +790,33 @@ async function main() {
     notes.push(`reply from ${incoming.peer}: "${short(incoming.body, 60)}"`);
   });
 
-  await scenario('viewer-role', 'Viewer: 403 for commands, SMS, settings and users; alerts, events and commands redacted (REST and socket)', async (notes) => {
-    const created = expectStatus(await api().post('/api/users', { ...VIEWER, role: 'viewer' }, adminOpts()), 201, 'POST /api/users');
+  await scenario('viewer-role', 'Viewer: created with reauth_password; must enroll TOTP before reading anything; then 403 for commands, SMS, settings and users; alerts, events and commands redacted (REST and socket)', async (notes) => {
+    // Every user-management write needs the acting admin's own password.
+    const body = { ...VIEWER, role: 'viewer' };
+    expectReauth(await api().post('/api/users', body, adminOpts()), 'POST /api/users without reauth_password');
+    expectReauth(await api().post('/api/users', { ...body, reauth_password: 'not-the-password' }, adminOpts()), 'POST /api/users with a wrong reauth_password');
+    const created = expectStatus(await api().post('/api/users', { ...body, reauth_password: ADMIN.password }, adminOpts()), 201, 'POST /api/users');
     eq(created.role, 'viewer', 'created role');
+    check(!JSON.stringify(created).includes(VIEWER.password), 'POST /api/users echoes the password');
+
+    // Plan 10: TOTP for every role. The first sign-in only allows enrollment.
     const login = expectStatus(await api().post('/api/auth/login', VIEWER), 200, 'viewer login');
-    eq(login.totp_required, false, 'viewer without TOTP gets a session directly');
-    S.viewerToken = login.token;
-    const v = { token: S.viewerToken };
-    const me = expectStatus(await api().get('/api/auth/me', v), 200, 'viewer me');
+    eq(login.totp_required, false, 'viewer without TOTP: first login gives an enrollment-only session');
+    const t1 = { token: login.token };
+    const me = expectStatus(await api().get('/api/auth/me', t1), 200, 'viewer me');
     eq(me.user.role, 'viewer', 'viewer me role');
-    eq(me.totp_enrollment_required, false, 'viewers are not asked to enroll');
+    eq(me.totp_enrollment_required, true, 'a viewer without TOTP must enroll');
+    await expectEnrollmentOnly(login.token, 'viewer without TOTP');
+    const setup = expectStatus(await api().post('/api/auth/totp/setup', undefined, t1), 200, 'viewer TOTP setup');
+    S.viewerAuth = new Authenticator(setup.secret);
+    expectStatus(await api().post('/api/auth/totp/enable', { code: await S.viewerAuth.nextCode() }, t1), 200, 'viewer TOTP enable');
+    eq(expectStatus(await api().get('/api/auth/me', t1), 200, 'viewer me after enable').totp_enrollment_required, false, 'viewer me.totp_enrollment_required after enable');
+    // From now on the viewer signs in with password + code like an admin.
+    const login2 = expectStatus(await api().post('/api/auth/login', VIEWER), 200, 'viewer second login');
+    eq(login2.totp_required, true, 'viewer login asks for TOTP once enrolled');
+    const sess = expectStatus(await api().post('/api/auth/totp', { pending_token: login2.pending_token, code: await S.viewerAuth.nextCode() }), 200, 'viewer TOTP login');
+    S.viewerToken = sess.token;
+    const v = { token: S.viewerToken };
 
     const denied = [
       ['POST /api/commands', await api().post('/api/commands', { device_id: S.deviceId, name: 'refresh', args: {} }, v)],
@@ -715,8 +881,131 @@ async function main() {
     } finally {
       vdash.close();
     }
-    notes.push('403 x6, reads 200, carrier_sms/sms_received/send_sms redacted for viewers over REST and WS, no sms frames on the viewer socket');
+    notes.push('POST /api/users 401 without/with a wrong reauth_password; unenrolled viewer 403 + socket auth_failed, then enrolled; 403 x6, reads 200, carrier_sms/sms_received/send_sms redacted for viewers over REST and WS, no sms frames on the viewer socket');
   });
+
+  await scenario(
+    'users-reauth',
+    "PATCH/DELETE /api/users need reauth_password; no self password or TOTP reset there; a role change closes that user's socket with 4004 (session kept); reset_totp revokes sessions",
+    async (notes) => {
+      const me = expectStatus(await api().get('/api/auth/me', adminOpts()), 200, 'admin me');
+      const self = `/api/users/${me.user.id}`;
+      // Own password and own TOTP go through /auth/password and /auth/totp/disable, never PATCH.
+      const selfPw = await api().patch(self, { password: secretPassword('e2e-new-admin'), reauth_password: ADMIN.password }, adminOpts());
+      eq(selfPw.status, 400, 'PATCH own password: status');
+      eq(selfPw.body?.error, 'bad_request', 'PATCH own password: error');
+      const selfTotp = await api().patch(self, { reset_totp: true, reauth_password: ADMIN.password }, adminOpts());
+      eq(selfTotp.status, 400, 'PATCH own reset_totp: status');
+      eq(selfTotp.body?.error, 'bad_request', 'PATCH own reset_totp: error');
+      const meAfter = expectStatus(await api().get('/api/auth/me', adminOpts()), 200, 'admin session after the refused self-PATCHes');
+      eq(meAfter.user.totp_enabled, true, 'admin TOTP after the refused self reset');
+      check((await api().post('/api/auth/login', ADMIN)).body?.totp_required === true, 'the admin password must be unchanged');
+
+      const temp = await createEnrolledUser(TEMP_USER, 'viewer');
+      const path = `/api/users/${temp.id}`;
+      const tdash = new DashClient(`${S.wsBase}/ws/dashboard`, 'temp user socket');
+      let tdash2 = null;
+      try {
+        eq((await tdash.connect(temp.token)).user.role, 'viewer', 'temp socket role');
+        tdash.subscribe(S.deviceId, false);
+        await tdash.waitFor((x) => x.t === 'snapshot', { label: 'temp user snapshot' });
+
+        expectReauth(await api().patch(path, { role: 'admin' }, adminOpts()), 'PATCH role without reauth_password');
+        expectReauth(await api().patch(path, { role: 'admin', reauth_password: 'not-the-password' }, adminOpts()), 'PATCH role with a wrong reauth_password');
+        await sleep(300);
+        check(!tdash.closed, 'a refused PATCH closed the user socket');
+        const promoted = expectStatus(await api().patch(path, { role: 'admin', reauth_password: ADMIN.password }, adminOpts()), 200, 'PATCH role');
+        eq(promoted.role, 'admin', 'role after PATCH');
+        // docs/protocol.md 7: 4004 = role changed, the session stays valid; the client re-auths.
+        await waitFor(() => tdash.closed, { timeout: 5000, label: 'temp socket closed after the role change' });
+        eq(tdash.closed.code, 4004, 'dashboard close code after a role change');
+        tdash2 = new DashClient(`${S.wsBase}/ws/dashboard`, 'temp user socket (re-auth)');
+        eq((await tdash2.connect(temp.token)).user.role, 'admin', 'role on the re-authenticated socket');
+        eq(expectStatus(await api().get('/api/auth/me', { token: temp.token }), 200, 'temp me after the role change').user.role, 'admin', 'me.role after the role change');
+
+        // Lost phone: reset_totp clears the authenticator and revokes the sessions.
+        expectReauth(await api().patch(path, { reset_totp: true }, adminOpts()), 'PATCH reset_totp without reauth_password');
+        expectStatus(await api().patch(path, { reset_totp: true, reauth_password: ADMIN.password }, adminOpts()), 200, 'PATCH reset_totp');
+        eq((await api().get('/api/auth/me', { token: temp.token })).status, 401, 'temp session after reset_totp');
+        await waitFor(() => tdash2.closed, { timeout: 5000, label: 'temp socket closed after reset_totp' });
+        eq(tdash2.closed.code, 4001, 'dashboard close code after reset_totp');
+        const relogin = expectStatus(await api().post('/api/auth/login', TEMP_USER), 200, 'temp login after reset_totp');
+        eq(relogin.totp_required, false, 'login after reset_totp has no TOTP step');
+        eq(expectStatus(await api().get('/api/auth/me', { token: relogin.token }), 200, 'temp me after reset').totp_enrollment_required, true, 'must enroll again after reset_totp');
+      } finally {
+        tdash.close();
+        tdash2?.close();
+      }
+
+      expectReauth(await api().del(path, undefined, adminOpts()), 'DELETE /api/users without reauth_password');
+      expectReauth(await api().del(path, { reauth_password: 'not-the-password' }, adminOpts()), 'DELETE /api/users with a wrong reauth_password');
+      eq((await api().del(path, { reauth_password: ADMIN.password }, adminOpts())).status, 204, 'DELETE /api/users status');
+      const users = expectStatus(await api().get('/api/users', adminOpts()), 200, 'GET /api/users');
+      check(!users.some((u) => u.id === temp.id), 'deleted user still listed');
+      const selfDel = await api().del(self, { reauth_password: ADMIN.password }, adminOpts());
+      check(selfDel.status >= 400 && selfDel.status < 500 && selfDel.status !== 401, `deleting yourself must be refused, got ${selfDel.status}`);
+      eq((await api().get('/api/auth/me', adminOpts())).status, 200, 'admin session after the refused self-delete');
+      notes.push('self password / reset_totp 400; PATCH and DELETE 401 without or with a wrong reauth_password; role change -> socket 4004, re-auth ok with the new role; reset_totp -> session 401, socket 4001; user deleted');
+    },
+  );
+
+  await scenario(
+    'cmd-hotspot-secret',
+    'hotspot password (CommandSpec.secret_args) reaches the phone but never comes back over REST or WS (admin or viewer), and is blanked in storage',
+    async (notes) => {
+      const secret = secretPassword('e2e-hotspot');
+      const vdash = new DashClient(`${S.wsBase}/ws/dashboard`, 'viewer socket');
+      try {
+        await vdash.connect(S.viewerToken);
+        vdash.subscribe(S.deviceId, false);
+        await vdash.waitFor((x) => x.t === 'snapshot', { label: 'viewer snapshot' });
+        const am = S.dash.mark();
+        const vm = vdash.mark();
+        const post = await sendCommand('hotspot', { enabled: true, ssid: 'E2E-Hotspot', password: secret });
+        const rec = expectStatus(post, 201, 'POST /api/commands hotspot');
+        check(!post.text.includes(secret), 'the POST /api/commands response returns the hotspot password');
+        const done = await waitCommand(rec.id, 'done', 20_000);
+        // The simulator says so only when a password argument arrived (and passed its 8..63 check).
+        check(/new password set/.test(done.output ?? ''), `the phone did not get the hotspot password: ${done.output}`);
+
+        for (const [who, token] of [
+          ['admin', S.token],
+          ['viewer', S.viewerToken],
+        ]) {
+          const list = await api().get(`/api/commands?device_id=${S.deviceId}&limit=200`, { token });
+          eq(list.status, 200, `${who} GET /api/commands`);
+          check(list.body.some((c) => c.id === rec.id), `${who}: the hotspot command is not listed`);
+          check(!list.text.includes(secret), `${who}: GET /api/commands returns the hotspot password`);
+        }
+        await sleep(500);
+        check(S.dash.filter((x) => x.t === 'command' && x.command?.id === rec.id, am).length > 0, 'admin socket got no command broadcast for the hotspot command');
+        check(vdash.filter((x) => x.t === 'command' && x.command?.id === rec.id, vm).length > 0, 'viewer socket got no command broadcast for the hotspot command');
+        const leaks = [...S.dash.filter(() => true, am).map((e) => ['admin', e.msg]), ...vdash.filter(() => true, vm).map((e) => ['viewer', e.msg])]
+          .filter(([, m]) => JSON.stringify(m).includes(secret))
+          .map(([who, m]) => `${who} ${m.t}`);
+        eq(leaks.join(', '), '', 'socket messages carrying the hotspot password');
+
+        // Stored args are blanked once the command reached the Agent.
+        let db = null;
+        await waitFor(
+          async () => {
+            db = await storedCommandArgs(rec.id);
+            return db.skipped || (db.args !== null && !db.args.includes(secret));
+          },
+          { timeout: 5000, label: 'hotspot password blanked in commands.args' },
+        ).catch((err) => {
+          throw new AssertionError(`${err.message}; stored args: ${db?.args === null ? 'row missing' : 'still contain the password'}`);
+        });
+        if (db.skipped) notes.push(`storage check skipped: ${db.skipped}`);
+        check(!S.sim.text.includes(secret), 'the simulator logged the hotspot password');
+        check(!S.server.text.includes(secret), 'the Server logged the hotspot password');
+        await runCommand('hotspot', { enabled: false });
+        notes.push(`hotspot ${rec.id}: "${done.output}"; password absent from POST/GET (admin, viewer), socket broadcasts and logs${db.skipped ? '' : ', blanked in commands.args'}`);
+      } finally {
+        vdash.close();
+      }
+    },
+  );
 
   await scenario('cmd-usb-reverted', 'usb_tethering off without keep -> reverted at the deadline (revert event + watchdog alert)', async (notes) => {
     check(revertWait, 'the armed command from cmd-usb-revert-armed is missing');
@@ -856,8 +1145,8 @@ async function main() {
       const revertEvents = (await events(S.token, '&kind=revert')).filter((e) => e.data?.command_id === r.id);
       eq(revertEvents.length, 1, 'revert events for the command');
 
-      // Soft checks (reported as warnings, see the bug list in the README): docs/protocol.md 6 says
-      // the back-online reasons come from the backlog, and the duration is the time offline.
+      // docs/protocol.md 6: the back-online reasons come from the backlog (events at or after last
+      // seen), and the duration is reconnect time minus last seen.
       const lastSeen = Date.parse(offlineAlert.data?.last_seen ?? '') || linkDownAt;
       const reasonText = (ev) => {
         const d = ev.data ?? {};
@@ -871,11 +1160,12 @@ async function main() {
       const duringOutage = new Set(allEvents.filter((e) => Date.parse(e.ts) >= lastSeen).map(reasonText));
       const beforeOutage = allEvents.filter((e) => Date.parse(e.ts) < lastSeen).map(reasonText);
       const stale = back.data.reasons.filter((x) => beforeOutage.includes(x) && !duringOutage.has(x));
-      if (stale.length) notes.push(`WARNING back_online cites events from before the outage: ${stale.join(' | ')}`);
+      check(stale.length === 0, `back_online cites events from before the outage: ${stale.join(' | ')}`);
       const actualS = Math.round((reconnectAt - lastSeen) / 1000);
-      if (back.data.offline_s > actualS + 5) {
-        notes.push(`WARNING back_online offline_s=${back.data.offline_s} but the phone was offline ~${actualS} s (last seen -> status online)`);
-      }
+      check(
+        Math.abs(back.data.offline_s - actualS) <= 5,
+        `back_online offline_s=${back.data.offline_s} but the phone was offline ~${actualS} s (last seen -> status online)`,
+      );
       notes.push(
         `offline alert ${(offlineAfter / 1000).toFixed(0)} s after the link cut; ${st.outbox.length} rows persisted (${backlogFast.length} fast readings); ` +
           `reverted ("${reverted.error}"); back_online: "${short(back.message, 140)}"; ${inOutage.length} outage readings in history`,
@@ -944,13 +1234,67 @@ async function main() {
   });
 
   if (args.ui) {
-    await scenario('dashboard-ui', 'Headless Chrome: login with TOTP; Overview shows live values; Controls, History, Finder, Settings, Users render; no console errors or CSP violations', uiScenario);
+    await scenario(
+      'dashboard-ui',
+      'Headless Chrome: admin login with TOTP; Overview shows live values; Controls, History, Finder, Settings, Users render; a new viewer enrolls TOTP at first login; no console errors, CSP violations or failed requests',
+      uiScenario,
+    );
   } else {
     results.push({ id: 'dashboard-ui', title: 'Dashboard UI', passed: null, skipped: true, notes: '--no-ui' });
   }
 }
 
 // --- Dashboard UI --------------------------------------------------------------------------------
+
+/** Base32 TOTP secret shown on the enrollment screen (grouped by 4 for reading), or null. */
+const SHOWN_TOTP_SECRET = `(() => {
+  for (const el of document.querySelectorAll('code, [data-totp-secret]')) {
+    const t = el.textContent.replace(/\\s+/g, '');
+    if (/^[A-Z2-7]{16,}$/.test(t)) return t;
+  }
+  return null;
+})()`;
+
+/**
+ * Signs in through the login form, then handles the second step: the TOTP code for an enrolled
+ * user (`expect: 'code'`, needs `auth`) or TOTP enrollment for a user without it (`expect:
+ * 'enroll'`; plan 10: every role, so the bootstrap admin too). Returns the user's Authenticator.
+ */
+async function uiSignIn(page, who, user, { expect, auth = null }) {
+  await page.waitFor(`!!document.querySelector('input[autocomplete="username"]')`, { label: `${who}: login form`, timeout: 20_000 });
+  await page.fill('input[autocomplete="username"]', user.username);
+  await page.fill('input[type="password"]', user.password);
+  await page.click('form button[type="submit"]');
+  const step = await page.waitFor(
+    `(() => {
+      const startButton = [...document.querySelectorAll('button')].some((b) => /start setup/i.test(b.textContent));
+      if (location.pathname === '/enroll' || startButton || ${SHOWN_TOTP_SECRET}) return 'enroll';
+      if (document.querySelector('input[autocomplete="one-time-code"]')) return 'code';
+      return null;
+    })()`,
+    { label: `${who}: TOTP step or TOTP enrollment after the password`, timeout: 20_000 },
+  );
+  eq(step, expect, `${who}: second sign-in step`);
+  if (step === 'code') {
+    await page.fill('input[autocomplete="one-time-code"]', await auth.nextCode());
+    await page.click('form button[type="submit"]');
+    return auth;
+  }
+  if (!(await page.eval(SHOWN_TOTP_SECRET))) {
+    await page.eval(`(() => { const b = [...document.querySelectorAll('button')].find((x) => /start setup/i.test(x.textContent)); if (b) b.click(); return !!b; })()`);
+  }
+  const secret = await page.waitFor(SHOWN_TOTP_SECRET, { label: `${who}: TOTP secret on the enrollment screen` });
+  const enrolled = new Authenticator(secret);
+  // docs/protocol.md 5.1: the Dashboard opens its socket only after enrollment.
+  check(!page.wsCreated.some((u) => u.endsWith('/ws/dashboard')), `${who}: the Dashboard opened /ws/dashboard before TOTP enrollment`);
+  await page.fill('input[autocomplete="one-time-code"]', await enrolled.nextCode());
+  await page.click('form button[type="submit"]');
+  await page.waitFor(`location.pathname !== '/enroll' && location.pathname !== '/login' && !document.querySelector('input[autocomplete="one-time-code"]')`, {
+    label: `${who}: enrollment finished`,
+    timeout: 20_000,
+  });
+  return enrolled;
+}
 
 async function uiScenario(notes) {
   const chromePath = findChrome(args.chrome);
@@ -985,12 +1329,7 @@ async function uiScenario(notes) {
     await page.navigate(`${S.base}/`);
     await page.waitFor(`location.pathname === '/login' && !!document.querySelector('input[autocomplete="username"]')`, { label: 'login form', timeout: 20_000 });
     await shot(page, 'login');
-    await page.fill('input[autocomplete="username"]', ADMIN.username);
-    await page.fill('input[type="password"]', ADMIN.password);
-    await page.click('form button[type="submit"]');
-    await page.waitFor(`!!document.querySelector('input[autocomplete="one-time-code"]')`, { label: 'TOTP step' });
-    await page.fill('input[autocomplete="one-time-code"]', await S.auth.nextCode());
-    await page.click('form button[type="submit"]');
+    await uiSignIn(page, 'admin', ADMIN, { expect: 'code', auth: S.auth });
     await page.waitFor(`location.pathname === '/' && [...document.querySelectorAll('h1')].some((h) => h.textContent.trim() === 'Overview')`, { label: 'Overview after login', timeout: 20_000 });
 
     // Overview: online, the simulated model, and the RSRP the simulator is sending right now.
@@ -1061,7 +1400,9 @@ async function uiScenario(notes) {
     check(!(await page.eval('window.__e2eInline === 1')), 'an inline script ran despite the CSP');
     check(page.console.slice(consoleBefore).some((c) => c.type === 'error' && c.text.includes('self-check')), 'console.error capture does not work');
 
-    // A viewer in a separate browser context: no Controls or Messages, and /controls redirects.
+    // A new viewer in a separate browser context: enrolls TOTP at its first sign-in, then has no
+    // Controls or Messages, and /controls redirects.
+    expectStatus(await api().post('/api/users', { ...VIEWER_UI, role: 'viewer', reauth_password: ADMIN.password }, adminOpts()), 201, 'POST /api/users (UI viewer)');
     const { browserContextId } = await cdp.send('Target.createBrowserContext');
     const { targetId } = await cdp.send('Target.createTarget', { url: 'about:blank', browserContextId });
     const { sessionId } = await cdp.send('Target.attachToTarget', { targetId, flatten: true });
@@ -1069,28 +1410,40 @@ async function uiScenario(notes) {
     for (const m of ['Page.enable', 'Runtime.enable', 'Log.enable', 'Network.enable']) await vpage.send(m);
     await vpage.send('Emulation.setDeviceMetricsOverride', { width: 1280, height: 900, deviceScaleFactor: 1, mobile: false });
     await vpage.navigate(`${S.base}/login`);
-    await vpage.waitFor(`!!document.querySelector('input[autocomplete="username"]')`, { label: 'viewer login form' });
-    await vpage.fill('input[autocomplete="username"]', VIEWER.username);
-    await vpage.fill('input[type="password"]', VIEWER.password);
-    await vpage.click('form button[type="submit"]');
+    await uiSignIn(vpage, 'viewer', VIEWER_UI, { expect: 'enroll' });
+    await shot(vpage, 'viewer-enrolled');
     await vpage.waitFor(`location.pathname === '/' && document.body.innerText.includes('Online')`, { label: 'viewer Overview', timeout: 20_000 });
+    const vme = expectStatus(await api().get('/api/users', adminOpts()), 200, 'GET /api/users').find((u) => u.username === VIEWER_UI.username);
+    eq(vme?.totp_enabled, true, 'UI viewer totp_enabled after enrolling in the browser');
+    const vlogin = expectStatus(await api().post('/api/auth/login', VIEWER_UI), 200, 'UI viewer API login');
+    eq(vlogin.totp_required, true, 'UI viewer login asks for TOTP after enrolling in the browser');
     check(!(await vpage.eval(`!!document.querySelector('a[href="/controls"]') || !!document.querySelector('a[href="/messages"]')`)), 'viewer nav shows Controls or Messages');
     await vpage.navigate(`${S.base}/controls`);
     await vpage.waitFor(`location.pathname === '/' && [...document.querySelectorAll('h1')].some((h) => h.textContent.trim() === 'Overview')`, { label: 'viewer redirected from /controls' });
     await shot(vpage, 'viewer-overview');
     const vErrs = problems(vpage);
+    // An enrollment-only session must not call anything that answers 403 totp_enrollment_required.
+    failed.push(...vpage.responses.filter((r) => r.url.startsWith(S.base) && r.status >= 400).map((r) => ({ ...r, url: `${r.url} (viewer)` })));
 
     const all = [...errs, ...csp.map((v) => `CSP violation: ${v.directive} blocked ${v.blocked} (${v.source}:${v.line})`), ...vErrs.map((e) => `viewer ${e}`)];
-    if (failed.length) notes.push(`HTTP >= 400 seen by the page: ${failed.map((f) => `${f.status} ${f.url.replace(S.base, '')}`).join(', ')}`);
+    if (failed.length) notes.push(`HTTP >= 400 seen by the pages: ${failed.map((f) => `${f.status} ${f.url.replace(S.base, '')}`).join(', ')}`);
     notes.push(`screenshots: ${shots.length} in ${SHOTS}`);
     check(all.length === 0, `browser problems:\n  ${all.join('\n  ')}`);
     check(failed.length === 0, `requests failed in the browser: ${failed.map((f) => `${f.status} ${f.url}`).join(', ')}`);
-    notes.push('no console errors, exceptions or CSP violations (admin + viewer); service worker registered; detectors self-checked with a blocked inline script');
+    notes.push('admin signed in with password + TOTP; a new viewer enrolled TOTP in the browser at first sign-in (no socket before enrollment)');
+    notes.push('no console errors, exceptions, CSP violations or failed requests (admin + viewer); service worker registered; detectors self-checked with a blocked inline script');
   } finally {
     await cdp.send('Browser.close').catch(() => undefined);
     cdp.close();
     await procs.stop(child, { timeout: 5000 });
-    rmSync(join(WORK, 'chrome-profile'), { recursive: true, force: true });
+    // Chrome's helper processes (crashpad, GPU) can still write into the profile for a moment after
+    // the browser exits, so retry; the profile lives under <out>/work, and a leftover is harmless
+    // there, so a cleanup failure must not mask the scenario's own result.
+    try {
+      rmSync(join(WORK, 'chrome-profile'), { recursive: true, force: true, maxRetries: 10, retryDelay: 200 });
+    } catch (err) {
+      notes.push(`note: could not remove the Chrome profile (${err.code ?? err.message}); left in ${WORK}`);
+    }
   }
 }
 

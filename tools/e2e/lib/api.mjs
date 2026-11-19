@@ -35,6 +35,13 @@ export class Api {
   put(path, body, opts = {}) {
     return this.req('PUT', path, { ...opts, body });
   }
+  patch(path, body, opts = {}) {
+    return this.req('PATCH', path, { ...opts, body });
+  }
+  /** DELETE, optionally with a JSON body (DELETE /api/users/:id carries reauth_password). */
+  del(path, body, opts = {}) {
+    return this.req('DELETE', path, { ...opts, body });
+  }
 }
 
 /** Throws with the response body when the status is not the expected one. */

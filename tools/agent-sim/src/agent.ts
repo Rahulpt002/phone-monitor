@@ -53,6 +53,10 @@ export interface AgentOptions {
   backoffMaxMs?: number;
   stableMs?: number;
   pingIntervalMs?: number;
+  /** Wait after close code 4002 before reconnecting (docs/protocol.md 3.1; Kotlin SyncConfig.replacedBackoffMs). */
+  replacedBackoffMs?: number;
+  /** --exit-on-replaced: stop and exit on 4002 instead of waiting and reconnecting. */
+  exitOnReplaced?: boolean;
 }
 
 type ResolvedOptions = Required<Omit<AgentOptions, 'deviceId' | 'offlineForS' | 'seed'>> &
@@ -72,7 +76,8 @@ interface Repeating {
  * The simulated Agent: owns the phone model, outbox, command executor, auto-revert, watchdog,
  * Finder and scenarios, and speaks the Agent protocol (docs/protocol.md 3) over `Connection`.
  *
- * Emits 'exit' (AgentExitReason) when it stops by itself (4001, 4002, power_off).
+ * Emits 'exit' (AgentExitReason) when it stops by itself (4001, power_off, and 4002 only with
+ * `exitOnReplaced`).
  */
 export class Agent extends EventEmitter {
   readonly clock: SimClock;
@@ -93,7 +98,6 @@ export class Agent extends EventEmitter {
   private settingsVersion: number;
   private rates: Rates;
   private deviceId: string | null;
-  private offsetMs = 0;
   private ready = false;
   private holdDrain = false;
   private started = false;
@@ -131,6 +135,8 @@ export class Agent extends EventEmitter {
       backoffMaxMs: 60_000,
       stableMs: 60_000,
       pingIntervalMs: 20_000,
+      replacedBackoffMs: 30_000,
+      exitOnReplaced: false,
       ...options,
     };
     this.store = store;
@@ -193,7 +199,7 @@ export class Agent extends EventEmitter {
       undo: (r) => this.applyUndo(r),
       report: (r, state, detail, quiet) => {
         this.log.info('revert', `${r.command_id} ${r.name}: ${state} (${detail})`);
-        this.enqueue({ t: 'cmd_revert', id: r.command_id, state, detail, ts: this.clock.iso() });
+        this.enqueue({ t: 'cmd_revert', id: r.command_id, state, detail, ts: this.clock.serverIso() });
         if (state === 'reverted' && !quiet) {
           this.emitEvent({
             kind: 'revert',
@@ -217,8 +223,8 @@ export class Agent extends EventEmitter {
       locks: this.locks,
       keepLink: this.opts.keepLink,
       settings: () => this.settings,
-      clockOffsetMs: () => this.offsetMs,
       enqueue: (m) => this.enqueue(m),
+      reportQueued: (id) => this.outbox.peek().some((m) => (m.t === 'cmd_ack' || m.t === 'cmd_result') && m.id === id),
       emit: (s) => this.emitEvent(s),
       generation: () => this.gen,
       rebootsInWindow: () => this.rebootsInWindow(),
@@ -287,6 +293,8 @@ export class Agent extends EventEmitter {
       backoffMaxMs: this.opts.backoffMaxMs,
       stableMs: this.opts.stableMs,
       pingIntervalMs: this.opts.pingIntervalMs,
+      replacedBackoffMs: this.opts.replacedBackoffMs,
+      fatalOnReplaced: this.opts.exitOnReplaced,
       userAgent: `hsm-agent-sim/${AGENT_VERSION}`,
     });
     this.watchPrev = watchPhone(this.phone);
@@ -348,7 +356,7 @@ export class Agent extends EventEmitter {
   }
 
   currentSettings(): { settings: Settings; version: number; rates: Rates; offsetMs: number } {
-    return { settings: this.settings, version: this.settingsVersion, rates: this.rates, offsetMs: this.offsetMs };
+    return { settings: this.settings, version: this.settingsVersion, rates: this.rates, offsetMs: this.clock.serverOffsetMs };
   }
 
   rebootsInWindow(): number {
@@ -404,7 +412,9 @@ export class Agent extends EventEmitter {
 
   private onHello(msg: Extract<ServerToAgent, { t: 'hello' }>): void {
     const serverMs = Date.parse(msg.server_time);
-    this.offsetMs = Number.isFinite(serverMs) ? serverMs - this.clock.now() : 0;
+    // Like Kotlin Clock.syncWithServer: an unparseable server_time keeps the previous offset.
+    if (Number.isFinite(serverMs)) this.clock.setServerOffset(serverMs - this.clock.now());
+    const offsetMs = this.clock.serverOffsetMs;
     if (typeof msg.device_id === 'string' && msg.device_id && msg.device_id !== this.deviceId) {
       this.deviceId = msg.device_id;
       this.store.update({ device_id: msg.device_id });
@@ -419,7 +429,7 @@ export class Agent extends EventEmitter {
     this.log.info(
       'hello',
       `device ${this.deviceId ?? '?'}, settings v${this.settingsVersion}, fast every ${this.rates.fast_s} s${this.rates.mirror ? ', finder mirror on' : ''}, ` +
-        `clock offset ${this.offsetMs >= 0 ? '+' : ''}${this.offsetMs} ms${backlog ? `, ${backlog} buffered to send` : ''}`,
+        `clock offset ${offsetMs >= 0 ? '+' : ''}${offsetMs} ms${backlog ? `, ${backlog} buffered to send` : ''}`,
     );
     this.sendTelemetry('static');
     this.sendTelemetry('slow');
@@ -466,7 +476,12 @@ export class Agent extends EventEmitter {
   private onClose(info: CloseInfo): void {
     const wasReady = this.ready;
     this.ready = false;
-    if (info.wasOpen && !info.local) {
+    if (info.code === 4002 && !info.local) {
+      this.log.warn(
+        `replaced (4002): another connection with this device token took over; waiting ${formatDuration(this.opts.replacedBackoffMs / 1000)} before reconnecting ` +
+          `(${this.outbox.size} messages buffered). Run one simulator per paired device.`,
+      );
+    } else if (info.wasOpen && !info.local) {
       this.log.info('conn', `disconnected (code ${info.code}${info.reason ? `, ${info.reason}` : ''}); ${this.outbox.size} messages buffered`);
     } else if (wasReady && info.local) {
       this.log.debug('conn', `socket closed (${info.reason})`);
@@ -482,7 +497,7 @@ export class Agent extends EventEmitter {
       this.exit('unauthorized');
     } else {
       this.log.error('replaced (4002): another Agent connected with this device token.');
-      this.log.error('Stopping so the two do not keep replacing each other. Run one simulator per paired device.');
+      this.log.error('Stopping (--exit-on-replaced). Run one simulator per paired device.');
       this.exit('replaced');
     }
   }
@@ -526,14 +541,14 @@ export class Agent extends EventEmitter {
 
   private emitEvent(spec: EventSpec): void {
     if (this.stopped) return;
-    const ev = makeEvent(spec, this.clock.iso());
+    const ev = makeEvent(spec, this.clock.serverIso());
     this.log.info('event', `${spec.kind}: ${spec.message}`);
     this.enqueue({ t: 'event', event: ev });
   }
 
   private sendTelemetry(tier: TelemetryTier): void {
     if (!this.phone.powered || this.agentDown || this.stopped) return;
-    const ts = this.clock.iso();
+    const ts = this.clock.serverIso();
     if (tier === 'fast') {
       this.enqueue({ t: 'telemetry', ts, tier, ...this.phone.fastGroups() });
     } else if (tier === 'slow') {
@@ -550,7 +565,7 @@ export class Agent extends EventEmitter {
     const sys = this.phone.system;
     const hb: HeartbeatMsg = {
       t: 'heartbeat',
-      ts: this.clock.iso(now),
+      ts: this.clock.serverIso(now),
       uptime_s: Math.max(0, Math.floor((now - sys.bootAt) / 1000)),
       agent_uptime_s: Math.max(0, Math.floor((now - sys.agentStartAt) / 1000)),
       outbox: this.outbox.size,

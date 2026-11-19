@@ -42,7 +42,8 @@ npm run dev:web                                                                 
 ```
 
 1. Sign in to the Dashboard as `admin`. Right after the first sign-in it asks you to set up an
-   authenticator app (TOTP), because admins without one can only read.
+   authenticator app (TOTP): every account, admin or viewer, must enroll before it can see or
+   change anything (plan 10).
 2. Open **Settings > Pairing and phones** to get a pairing code.
 3. Start the simulated phone with that code:
 
@@ -59,6 +60,7 @@ See [tools/agent-sim/README.md](tools/agent-sim/README.md) for scenarios and opt
 npm run typecheck      # all TypeScript workspaces
 npm test               # shared, server, web, simulator unit and integration tests
 npm run build          # Dashboard, then Server (server/dist)
+npm run e2e            # built Server + simulator + headless Chrome Dashboard (tools/e2e/README.md; --no-ui skips Chrome)
 cd agent && ./gradlew assembleDebug testDebugUnitTest lintDebug   # Android (JDK 17 + Android SDK 35)
 ```
 

@@ -114,6 +114,7 @@ async function main(): Promise<number> {
       seed: opts.seed,
       clockSkewS: opts.clockSkewS,
       persistOutbox: opts.persistOutbox,
+      exitOnReplaced: opts.exitOnReplaced,
     },
     store,
     log,

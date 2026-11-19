@@ -1,6 +1,7 @@
 import {
   COMMANDS,
   PROTOCOL,
+  normalizePhoneNumber,
   type CapabilityMap,
   type CmdMsg,
   type CmdRejectReason,
@@ -37,9 +38,9 @@ export interface CommandHost {
   /** --keep-link: the Agent's link survives commands that would normally cut it. */
   keepLink: boolean;
   settings(): Settings;
-  /** Server clock minus phone clock, from the last `hello`. */
-  clockOffsetMs(): number;
   enqueue(msg: OutboxInput): void;
+  /** A cmd_ack or cmd_result for this command id is still in the outbox (not yet acknowledged). */
+  reportQueued(commandId: string): boolean;
   emit(spec: EventSpec): void;
   generation(): number;
   rebootsInWindow(): number;
@@ -96,8 +97,7 @@ const isInt = (v: unknown, lo: number, hi: number): v is number => isNum(v, lo, 
 const isStr = (v: unknown, min: number, max: number): v is string => typeof v === 'string' && v.trim().length >= min && v.length <= max;
 const absent = (v: unknown) => v === undefined || v === null;
 const PACKAGE_RE = /^[A-Za-z][A-Za-z0-9_]*(\.[A-Za-z0-9_]+)+$/;
-const PHONE_RE = /^\+?[0-9]{3,15}$/;
-const USSD_RE = /^[*#][0-9*#]{0,30}#$/;
+const USSD_RE = /^[*#][0-9*#+]{1,63}$/;
 
 /** Argument check for each command (`invalid_args`); returns a reason or null. */
 export function validateArgs(name: CommandName, a: Args): string | null {
@@ -110,14 +110,16 @@ export function validateArgs(name: CommandName, a: Args): string | null {
       return isBool(a.enabled) ? null : 'enabled must be true or false';
     case 'data_cycle':
     case 'airplane_cycle':
-      return absent(a.off_seconds) || isNum(a.off_seconds, 1, 300) ? null : 'off_seconds must be 1..300';
+      return absent(a.off_seconds) || isNum(a.off_seconds, 1, 600) ? null : 'off_seconds must be 1..600';
     case 'usb_tethering':
       if (!isBool(a.enabled)) return 'enabled must be true or false';
       return absent(a.function) || a.function === 'rndis' || a.function === 'ncm' ? null : "function must be 'rndis' or 'ncm'";
     case 'hotspot':
       if (!isBool(a.enabled)) return 'enabled must be true or false';
       if (!absent(a.ssid) && !isStr(a.ssid, 1, 32)) return 'ssid must be 1..32 characters';
-      if (!absent(a.password) && !isStr(a.password, 8, 63)) return 'password must be 8..63 characters';
+      if (!absent(a.password) && !(typeof a.password === 'string' && /^[\x20-\x7E]{8,63}$/.test(a.password))) {
+        return 'password must be 8..63 printable ASCII characters';
+      }
       return null;
     case 'network_mode':
       return NETWORK_MODES.includes(a.mode as NetworkMode) ? null : `mode must be one of ${NETWORK_MODES.join(', ')}`;
@@ -132,10 +134,10 @@ export function validateArgs(name: CommandName, a: Args): string | null {
     case 'app_enable':
       return typeof a.package === 'string' && PACKAGE_RE.test(a.package) ? null : 'package must be a package name';
     case 'send_sms':
-      if (typeof a.to !== 'string' || !PHONE_RE.test(a.to.replace(/[\s-]/g, ''))) return 'to must be a phone number';
+      if (typeof a.to !== 'string' || normalizePhoneNumber(a.to) === null) return 'to must be a phone number';
       return isStr(a.body, 1, 1600) ? null : 'body must be 1..1600 characters';
     case 'ussd':
-      return typeof a.code === 'string' && USSD_RE.test(a.code) ? null : 'code must look like *123#';
+      return typeof a.code === 'string' && USSD_RE.test(a.code.trim()) ? null : 'code must look like *123#';
     case 'shell':
       if (!isStr(a.cmd, 1, 4096)) return 'cmd must be a non-empty command';
       return absent(a.timeout_s) || isNum(a.timeout_s, 1, 600) ? null : 'timeout_s must be 1..600';
@@ -145,8 +147,10 @@ export function validateArgs(name: CommandName, a: Args): string | null {
     case 'speed_test':
       return absent(a.spot_id) || isStr(a.spot_id, 1, 64) ? null : 'spot_id must be a spot id';
     case 'finder_spot_test':
-      if (!isStr(a.name, 1, 80)) return 'name must be 1..80 characters';
-      if (!absent(a.orientation) && !isStr(a.orientation, 1, 40)) return 'orientation must be 1..40 characters';
+      if (typeof a.name !== 'string' || !isStr(a.name.trim(), 1, 64)) return 'name must be 1..64 characters';
+      if (!absent(a.orientation) && !(typeof a.orientation === 'string' && a.orientation.trim().length <= 32)) {
+        return 'orientation must be at most 32 characters';
+      }
       return absent(a.duration_s) || isNum(a.duration_s, 5, 600) ? null : 'duration_s must be 5..600';
     case 'finder_set_baseline':
     case 'finder_delete_spot':
@@ -162,11 +166,17 @@ export function validateArgs(name: CommandName, a: Args): string | null {
 }
 
 const SEEN_LIMIT = 500;
+/** Latest reports kept in memory for re-sending (outputs can be large, so fewer than SEEN_LIMIT). */
+const REPORT_LIMIT = 100;
+
+type Report = Extract<OutboxInput, { t: 'cmd_ack' } | { t: 'cmd_result' }>;
 
 /** Receives `cmd`, applies the checks of docs/protocol.md 3.5 and reports through the outbox. */
 export class CommandExecutor {
   private readonly seen: string[];
   private readonly seenSet: Set<string>;
+  /** Latest cmd_ack / cmd_result per command id, oldest first (Map insertion order). */
+  private readonly reports = new Map<string, Report>();
 
   constructor(private readonly host: CommandHost, seen: readonly string[] = []) {
     this.seen = seen.slice(-SEEN_LIMIT);
@@ -179,9 +189,11 @@ export class CommandExecutor {
       log.warn('ignored a cmd without an id');
       return;
     }
-    // The Server re-sends queued commands after a reconnect; never execute one twice.
+    // The Server re-sends a command after a reconnect when it has no cmd_ack for it (it may have
+    // been written to a half-open socket). Never execute one twice; make sure the Server gets its
+    // latest report instead.
     if (this.seenSet.has(cmd.id)) {
-      log.debug('cmd', `${cmd.id} already handled, ignoring the duplicate`);
+      this.resendReport(cmd.id);
       return;
     }
     this.remember(cmd.id);
@@ -189,8 +201,8 @@ export class CommandExecutor {
     const who = cmd.user ? ` by ${cmd.user}` : '';
     const reason = this.check(cmd, args);
     if (reason) {
-      this.host.enqueue({ t: 'cmd_ack', id: cmd.id, accepted: false, reason, ts: this.host.clock.iso() });
-      log.info('cmd', `${cmd.id} ${String(cmd.name)} ${JSON.stringify(args)}${who}: rejected (${reason})`);
+      this.report({ t: 'cmd_ack', id: cmd.id, accepted: false, reason, ts: this.host.clock.serverIso() });
+      log.info('cmd', `${cmd.id} ${String(cmd.name)} ${argsForLog(cmd.name, args)}${who}: rejected (${reason})`);
       if (reason === 'reboot_limit') {
         const s = this.host.settings().watchdog;
         this.host.emit({
@@ -202,8 +214,8 @@ export class CommandExecutor {
       }
       return;
     }
-    this.host.enqueue({ t: 'cmd_ack', id: cmd.id, accepted: true, reason: null, ts: this.host.clock.iso() });
-    log.info('cmd', `${cmd.id} ${cmd.name} ${JSON.stringify(args)}${who}: accepted`);
+    this.report({ t: 'cmd_ack', id: cmd.id, accepted: true, reason: null, ts: this.host.clock.serverIso() });
+    log.info('cmd', `${cmd.id} ${cmd.name} ${argsForLog(cmd.name, args)}${who}: accepted`);
     void this.execute(cmd, args);
   }
 
@@ -212,7 +224,7 @@ export class CommandExecutor {
     const h = this.host;
     const settings = h.settings();
     const sentAt = Date.parse(cmd.sent_at);
-    const serverNow = h.clock.now() + h.clockOffsetMs();
+    const serverNow = h.clock.serverNow();
     // A command whose age cannot be proven is not fresh (plan 6.4 rule 6).
     if (!Number.isFinite(sentAt) || serverNow - sentAt > settings.commands.expiry_s * 1000) return 'expired';
     if (typeof cmd.name !== 'string' || !Object.hasOwn(COMMANDS, cmd.name)) return 'unsupported';
@@ -233,6 +245,37 @@ export class CommandExecutor {
       if (old !== undefined) this.seenSet.delete(old);
     }
     this.host.rememberCommands(this.seen);
+  }
+
+  /** Queues a cmd_ack / cmd_result and keeps it as this command's latest report. */
+  private report(msg: Report): void {
+    this.reports.delete(msg.id);
+    this.reports.set(msg.id, msg);
+    while (this.reports.size > REPORT_LIMIT) {
+      const oldest = this.reports.keys().next().value;
+      if (oldest === undefined) break;
+      this.reports.delete(oldest);
+    }
+    this.host.enqueue(msg);
+  }
+
+  /**
+   * A duplicate `cmd`: queue its latest report again (same content and ts, new seq) unless one is
+   * still in the outbox, which delivers it anyway. Reports are re-sent idempotently by the Server.
+   */
+  private resendReport(id: string): void {
+    const { log } = this.host;
+    const last = this.reports.get(id);
+    if (!last) {
+      log.debug('cmd', `${id} already handled, ignoring the duplicate (no report kept to send again)`);
+      return;
+    }
+    if (this.host.reportQueued(id)) {
+      log.debug('cmd', `${id} already handled, ignoring the duplicate (its report is still queued)`);
+      return;
+    }
+    log.info('cmd', `${id} received again: already handled, sending its ${last.t} again instead of running it twice`);
+    this.host.enqueue({ ...last });
   }
 
   private async execute(cmd: CmdMsg, args: Args): Promise<void> {
@@ -257,15 +300,16 @@ export class CommandExecutor {
     }
     const duration = Date.now() - started;
     const output = truncateUtf8(outcome.output, PROTOCOL.max_output_bytes);
-    h.enqueue({
+    this.report({
       t: 'cmd_result',
       id: cmd.id,
       ok: outcome.ok,
       output,
       error: outcome.ok ? null : (outcome.error ?? 'failed'),
       duration_ms: duration,
-      revert_deadline: outcome.armed ? h.clock.iso(outcome.armed.deadline) : null,
-      ts: h.clock.iso(),
+      // The deadline is kept on the phone clock (local timers); the wire carries server time.
+      revert_deadline: outcome.armed ? h.clock.serverIso(outcome.armed.deadline) : null,
+      ts: h.clock.serverIso(),
     });
     const summary = outcome.ok ? oneLine(output) : `failed: ${outcome.error ?? 'failed'}`;
     const revert = outcome.armed ? `; auto-revert armed (${outcome.armed.confirm}) until ${new Date(outcome.armed.deadline).toLocaleTimeString()}` : '';
@@ -277,8 +321,10 @@ export class CommandExecutor {
   private arm(cmd: CmdMsg, args: Args, undo: ArmedRevert['undo']): ArmedRevert | null {
     const h = this.host;
     const confirm: RevertConfirm | null = cmd.revert_confirm ?? COMMANDS[cmd.name].revertFor(args);
-    h.reverts.supersede(REVERT_TARGET[cmd.name], cmd.id, confirm !== null);
+    const superseded = h.reverts.supersede(REVERT_TARGET[cmd.name], cmd.id, COMMANDS[cmd.name].label);
     if (!confirm) return null;
+    // An earlier unconfirmed change on this state: the undo goes back to the state before it.
+    if (superseded[0]) undo = superseded[0].undo;
     const afterS =
       typeof cmd.revert_after_s === 'number' && cmd.revert_after_s > 0 ? cmd.revert_after_s : h.settings().commands.revert_after_s;
     const now = h.clock.now();
@@ -343,7 +389,8 @@ export class CommandExecutor {
           const ssid = typeof a.ssid === 'string' ? a.ssid : (f.hotspotSsid ?? 'HSM-Outdoor');
           await this.work(1500, 2500);
           h.setFlags({ hotspot: true, hotspotSsid: ssid });
-          return { ok: true, output: `hotspot on: SSID "${ssid}", WPA2` };
+          // The password itself never goes into output or logs (CommandSpec.secret_args).
+          return { ok: true, output: `hotspot on: SSID "${ssid}", WPA2${typeof a.password === 'string' ? ', new password set' : ''}` };
         }
         await this.work(400, 800);
         h.setFlags({ hotspot: false });
@@ -511,14 +558,14 @@ export class CommandExecutor {
     await this.work(800, 1600);
     const to = toRaw.replace(/[\s-]/g, '');
     const parts = Math.max(1, Math.ceil(body.length / 153));
-    h.recordSms({ id: newId('m_'), direction: 'out', peer: to, body, at: h.clock.iso() });
+    h.recordSms({ id: newId('m_'), direction: 'out', peer: to, body, at: h.clock.serverIso() });
     // Carriers answer SMS sent to their short codes.
     if (/^\d{3,6}$/.test(to)) {
       const gen = h.generation();
       h.later(h.clock.realMs(6), () => {
         if (gen !== h.generation()) return;
         const reply = shortCodeReply(to, body);
-        const at = h.clock.iso();
+        const at = h.clock.serverIso();
         const from = `SIMTEL-${to}`;
         h.recordSms({ id: newId('m_'), direction: 'in', peer: from, body: reply, at });
         h.emit({ kind: 'sms_received', severity: 'info', message: `SMS from ${from}: ${reply}`, data: { from, body: reply, at } });
@@ -526,6 +573,13 @@ export class CommandExecutor {
     }
     return { ok: true, output: `SMS sent to ${to} (${parts} part${parts === 1 ? '' : 's'})` };
   }
+}
+
+/** Arguments as JSON for the console, with CommandSpec.secret_args (hotspot password) redacted. */
+function argsForLog(name: unknown, args: Args): string {
+  const secret = typeof name === 'string' && Object.hasOwn(COMMANDS, name) ? (COMMANDS[name as CommandName].secret_args ?? []) : [];
+  if (!secret.some((k) => k in args)) return JSON.stringify(args);
+  return JSON.stringify(Object.fromEntries(Object.entries(args).map(([k, v]) => [k, secret.includes(k) ? '<redacted>' : v])));
 }
 
 function oneLine(text: string): string {

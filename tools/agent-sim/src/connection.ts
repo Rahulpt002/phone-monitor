@@ -18,6 +18,14 @@ export interface ConnectionOptions {
   /** WebSocket ping to detect dead sockets (OkHttp pingInterval on the real Agent). */
   pingIntervalMs?: number;
   handshakeTimeoutMs?: number;
+  /**
+   * After close code 4002 (replaced by a newer connection with the same token) wait this long
+   * before reconnecting; a link that comes back meanwhile does not cut the wait short
+   * (docs/protocol.md 3.1; Kotlin SyncConfig.replacedBackoffMs = 30 s).
+   */
+  replacedBackoffMs?: number;
+  /** Treat 4002 as fatal ('fatal' 4002) instead of waiting and reconnecting (--exit-on-replaced). */
+  fatalOnReplaced?: boolean;
   userAgent?: string;
 }
 
@@ -30,15 +38,17 @@ export interface CloseInfo {
   local: boolean;
 }
 
-/** Close codes that end the connection for good (docs/protocol.md 7). */
+/** Close codes that end the connection for good (docs/protocol.md 7); 4002 only with `fatalOnReplaced`. */
 export type FatalCode = 4001 | 4002;
 
 /**
  * The Agent's socket to WS /ws/agent: Bearer token on the upgrade, exponential backoff with
  * jitter, no reconnect while the link is down ("enabled" false), an immediate reconnect when the
- * link returns (the Android network-available callback), and a stop on 4001 / 4002.
+ * link returns (the Android network-available callback), a stop on 4001, and on 4002 a fixed
+ * `replacedBackoffMs` wait before reconnecting (like the Kotlin SyncEngine).
  *
- * Events: 'open', 'message' (parsed object), 'close' (CloseInfo), 'fatal' (FatalCode).
+ * Events: 'open', 'message' (parsed object), 'close' (CloseInfo; code 4002 when replaced),
+ * 'fatal' (FatalCode).
  */
 export class Connection extends EventEmitter {
   private ws: WebSocket | null = null;
@@ -49,6 +59,8 @@ export class Connection extends EventEmitter {
   private pingTimer: NodeJS.Timeout | null = null;
   private awaitingPong = false;
   private openedAt = 0;
+  /** Date.now() before which no reconnect happens (after a 4002). */
+  private replacedUntil = 0;
   private readonly opts: Required<Omit<ConnectionOptions, 'log' | 'rng'>> & Pick<ConnectionOptions, 'log' | 'rng'>;
 
   constructor(opts: ConnectionOptions) {
@@ -59,6 +71,8 @@ export class Connection extends EventEmitter {
       stableMs: 60_000,
       pingIntervalMs: 20_000,
       handshakeTimeoutMs: 20_000,
+      replacedBackoffMs: 30_000,
+      fatalOnReplaced: false,
       userAgent: 'hsm-agent-sim',
       ...opts,
     };
@@ -79,7 +93,10 @@ export class Connection extends EventEmitter {
     this.clearRetry();
     if (on) {
       this.attempt = 0;
-      this.connect();
+      // Network back during the 4002 wait: Kotlin waits with wakeOnNetwork = false, so do we.
+      const replacedWait = this.replacedUntil - Date.now();
+      if (replacedWait > 0) this.retryIn(replacedWait);
+      else this.connect();
     } else {
       this.closeSocket(1001, 'link down');
     }
@@ -116,6 +133,8 @@ export class Connection extends EventEmitter {
     this.ws = ws;
     let httpStatus: number | null = null;
     let lastError: string | null = null;
+    /** The Server's `{"t":"error","code":"replaced"}` that precedes close 4002. */
+    let replacedMsg = false;
 
     // The Server may refuse the upgrade itself (401/403) instead of accepting and closing with 4001.
     ws.on('unexpected-response', (_req, res) => {
@@ -138,6 +157,7 @@ export class Connection extends EventEmitter {
         log.warn('ignored a frame that is not JSON');
         return;
       }
+      if ((msg as { t?: unknown; code?: unknown } | null)?.t === 'error' && (msg as { code?: unknown }).code === 'replaced') replacedMsg = true;
       this.emit('message', msg);
     });
     ws.on('pong', () => {
@@ -160,9 +180,15 @@ export class Connection extends EventEmitter {
         this.emit('fatal', 4001 satisfies FatalCode);
         return;
       }
-      if (code === 4002) {
-        this.stopped = true;
-        this.emit('fatal', 4002 satisfies FatalCode);
+      if (code === 4002 || replacedMsg) {
+        if (this.opts.fatalOnReplaced) {
+          this.stopped = true;
+          this.emit('fatal', 4002 satisfies FatalCode);
+          return;
+        }
+        this.replacedUntil = Date.now() + this.opts.replacedBackoffMs;
+        this.emit('close', { code: 4002, reason, wasOpen, local: false } satisfies CloseInfo);
+        this.retryIn(this.opts.replacedBackoffMs);
         return;
       }
       if (!wasOpen) {
@@ -181,10 +207,16 @@ export class Connection extends EventEmitter {
     this.attempt = Math.min(this.attempt + 1, 20);
     const wait = Math.round(base * (0.8 + 0.4 * this.opts.rng.next()));
     this.opts.log.info('conn', `reconnecting in ${formatDuration(wait / 1000)}`);
+    this.retryIn(wait);
+  }
+
+  private retryIn(ms: number): void {
+    if (this.stopped || !this.enabled) return;
+    this.clearRetry();
     this.retryTimer = setTimeout(() => {
       this.retryTimer = null;
       this.connect();
-    }, wait);
+    }, Math.max(0, ms));
   }
 
   private clearRetry(): void {
