@@ -1,69 +1,10 @@
 import type { DeviceInfo } from '@hsm/shared';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
-import WebSocket from 'ws';
 import { totpCode } from '../src/auth/totp.js';
 import type { HsmServer } from '../src/server.js';
 import { iso } from '../src/util.js';
 import { ADMIN, FakeClock, fixture, makeServer, T0 } from './helpers.js';
-
-type Msg = Record<string, any>;
-
-/** Minimal WebSocket test client that records every message. */
-class Client {
-  readonly messages: Msg[] = [];
-  closed: { code: number; reason: string } | null = null;
-  private listeners: (() => void)[] = [];
-
-  private constructor(readonly ws: WebSocket) {
-    ws.on('message', (data) => {
-      this.messages.push(JSON.parse(data.toString()) as Msg);
-      this.notify();
-    });
-    ws.on('close', (code, reason) => {
-      this.closed = { code, reason: reason.toString() };
-      this.notify();
-    });
-  }
-
-  private notify() {
-    for (const l of this.listeners.splice(0)) l();
-  }
-
-  static open(url: string, headers: Record<string, string> = {}): Promise<Client> {
-    return new Promise((resolve, reject) => {
-      const ws = new WebSocket(url, { headers });
-      const c = new Client(ws);
-      ws.once('open', () => resolve(c));
-      ws.once('error', reject);
-    });
-  }
-
-  send(msg: unknown) {
-    this.ws.send(typeof msg === 'string' ? msg : JSON.stringify(msg));
-  }
-
-  async waitFor(pred: (m: Msg) => boolean, what: string, timeoutMs = 3000): Promise<Msg> {
-    const deadline = Date.now() + timeoutMs;
-    for (;;) {
-      const found = this.messages.find(pred);
-      if (found) return found;
-      if (Date.now() > deadline) throw new Error(`timed out waiting for ${what}; got ${JSON.stringify(this.messages.map((m) => m.t))}`);
-      await new Promise<void>((r) => {
-        this.listeners.push(r);
-        setTimeout(r, 50);
-      });
-    }
-  }
-
-  async waitClosed(timeoutMs = 3000) {
-    const deadline = Date.now() + timeoutMs;
-    while (!this.closed) {
-      if (Date.now() > deadline) throw new Error('socket did not close');
-      await new Promise((r) => setTimeout(r, 20));
-    }
-    return this.closed;
-  }
-}
+import { Client, type Msg } from './ws-client.js';
 
 describe('end to end: pairing, live sockets, fixtures and a command', () => {
   let server: HsmServer;
@@ -126,7 +67,7 @@ describe('end to end: pairing, live sockets, fixtures and a command', () => {
     expect(codeRes.status).toBe(201);
     const { code, deep_link, adb_command } = codeRes.body;
     expect(deep_link).toBe(`hsm://pair?server=${encodeURIComponent(base)}&code=${code}`);
-    expect(adb_command).toContain(deep_link);
+    expect(adb_command).toBe(`adb shell "am start -a android.intent.action.VIEW -d '${deep_link}' --ez auto true"`);
 
     const staticMsg = fixture<Msg[]>('agent-to-server.json').find((m) => m.tier === 'static')!;
     const { device_id: _ignored, ...info } = staticMsg.device as DeviceInfo;

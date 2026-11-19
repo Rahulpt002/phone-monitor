@@ -10,7 +10,7 @@ const CreateSchema = z.object({ username: z.string().max(64), password: z.string
 const PatchSchema = z.object({
   role: Role.optional(),
   password: z.string().max(256).optional(),
-  /** Clears the user's authenticator (lost phone). Extension to api.ts `{ role?, password? }`. */
+  /** Clears the user's authenticator and revokes their sessions (lost phone); see api.ts. */
   reset_totp: z.boolean().optional(),
 });
 

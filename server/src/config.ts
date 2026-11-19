@@ -31,8 +31,12 @@ export interface Config {
   corsOrigins: string[];
   webDist: string;
   logLevel: LogLevel;
-  /** Passed to Fastify `trustProxy`: true, false, or a comma list of proxy addresses/CIDRs. */
-  trustProxy: boolean | string;
+  /**
+   * Which proxies may set X-Forwarded-For/-Proto/-Host: true (any), false (none), a hop count
+   * (the client IP is the entry that many hops from the right), or a comma list of proxy
+   * addresses/CIDRs. See trustProxyOption.
+   */
+  trustProxy: boolean | number | string;
 }
 
 export const MIN_PASSWORD_LENGTH = 10;
@@ -92,15 +96,39 @@ const EnvSchema = z.object({
 });
 
 /**
- * true trusts every proxy (the client IP is then the left-most X-Forwarded-For entry); a list such
- * as "loopback,linklocal,uniquelocal" trusts only those hops. Fastify 5 ignores hop counts.
+ * TRUST_PROXY:
+ * - an integer N: trust exactly N proxy hops (the socket peer and the N-1 entries to its left), so
+ *   the client IP is the N-th X-Forwarded-For entry from the right. Behind Render, 1. A client can
+ *   prepend whatever it likes but cannot change the entry the proxy appended. 0 = false.
+ * - true / yes / on: trust everything; the client IP is the left-most X-Forwarded-For entry, which
+ *   a client can forge.
+ * - false / no / off: ignore X-Forwarded-* headers.
+ * - anything else: a comma list of trusted proxy addresses, CIDRs or the names loopback,
+ *   linklocal, uniquelocal (Docker + Caddy).
  */
-function parseTrustProxy(v: string | undefined): boolean | string {
+function parseTrustProxy(v: string | undefined): boolean | number | string {
   if (v === undefined) return true;
   const s = v.toLowerCase();
-  if (['true', '1', 'yes', 'on'].includes(s)) return true;
-  if (['false', '0', 'no', 'off'].includes(s)) return false;
+  if (/^\d+$/.test(s)) {
+    const n = Number(s);
+    if (n > 100) throw new ConfigError(`TRUST_PROXY: hop count ${n} is not plausible`);
+    return n === 0 ? false : n;
+  }
+  if (['true', 'yes', 'on'].includes(s)) return true;
+  if (['false', 'no', 'off'].includes(s)) return false;
   return v;
+}
+
+/**
+ * Fastify's `trustProxy` option for the configured value. Fastify 5 treats a number as "trust
+ * nothing" (lib/request.js getTrustProxyFn), so a hop count becomes a function: @fastify/proxy-addr
+ * calls it with hop 0 for the socket peer, 1 for the right-most X-Forwarded-For entry, and so on,
+ * and the client IP is the first address that is not trusted.
+ */
+export function trustProxyOption(tp: boolean | number | string): boolean | string | ((addr: string, hop: number) => boolean) {
+  if (typeof tp !== 'number') return tp;
+  const hops = tp;
+  return (_addr: string, hop: number) => hop < hops;
 }
 
 function parseOrigins(v: string | undefined): string[] {

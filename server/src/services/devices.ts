@@ -200,8 +200,8 @@ export class DeviceService {
         expires_at: iso(now + PAIR_CODE_TTL_MS),
         deep_link: deepLink,
         // Double quotes on the host keep the single quotes for the phone's shell, which would
-        // otherwise split the link at '&'.
-        adb_command: `adb shell "am start -a android.intent.action.VIEW -d '${deepLink}'"`,
+        // otherwise split the link at '&'. `--ez auto true` pairs without a tap (dead screen).
+        adb_command: `adb shell "am start -a android.intent.action.VIEW -d '${deepLink}' --ez auto true"`,
       };
     }
     throw new Error('could not allocate a unique pairing code');

@@ -36,7 +36,7 @@ The Server creates its tables on first start (migrations run automatically).
 
 1. Push this repository to GitHub (or GitLab).
 2. In <https://dashboard.render.com>: **New > Blueprint**, connect the repository.
-3. Set **Blueprint file path** to `deploy/render.yaml`.
+3. Render finds [`render.yaml`](../render.yaml) at the repository root (the Blueprint default), so leave **Blueprint file path** empty.
 4. Render asks for the variables marked `sync: false`:
 
    | Variable | Value |
@@ -50,12 +50,14 @@ The Server creates its tables on first start (migrations run automatically).
    | `VAPID_PUBLIC_KEY`, `VAPID_PRIVATE_KEY`, `VAPID_SUBJECT` | optional, see 1.5 |
    | `CORS_ORIGINS` | leave empty unless the Dashboard is hosted elsewhere (section 3) |
 
-5. **Apply**. The build runs `npm ci && npm run build` (Dashboard, then Server) and starts `npm start`. Render checks `GET /healthz`.
+5. **Apply**. The build runs `npm ci && npm run build` from the repository root (Dashboard, then Server) on Node 22 (`NODE_VERSION`), and starts `npm start` (`node server/dist/index.js`). Render checks `GET /healthz`.
 6. Open `https://<service-name>.onrender.com/healthz`. Expect `{"ok":true,…,"db":"ok"}`.
 
-The Blueprint pins the region to `singapore` (closest to India). Change `region` in `deploy/render.yaml` before creating the service if the phone is elsewhere; a service cannot move region later. Keep Turso in a nearby location: every write is a network round trip.
+The Blueprint pins the region to `singapore` (closest to India). Change `region` in `render.yaml` before creating the service if the phone is elsewhere; a service cannot move region later. Keep Turso in a nearby location: every write is a network round trip.
 
 Do not add `NODE_ENV=production` to the build environment: `npm ci` would then skip the dev dependencies the build needs.
+
+The Blueprint also sets `TRUST_PROXY=1` (one proxy hop), so the client IP used for login rate limits cannot be forged with an `X-Forwarded-For` header (section 6.1). If you create the web service by hand instead of from the Blueprint, set the same build and start commands, the health check path `/healthz`, `NODE_VERSION=22` and `TRUST_PROXY=1`.
 
 ### 1.3 First sign-in and TOTP
 
@@ -64,7 +66,13 @@ Do not add `NODE_ENV=production` to the build environment: `npm ci` would then s
 3. From now on, sign-in asks for the password and then the code.
 4. Optional: remove `ADMIN_PASSWORD` from Render's environment. It is only read while the users table is empty.
 5. **Settings > Users** adds more accounts: `admin` (monitor and control) or `viewer` (monitor only; no controls, no root shell, no SMS).
-6. **Settings > Pair phone** shows a QR code and an `adb` command for the Agent (docs/protocol.md section 2). Codes are single use and expire after 15 minutes.
+6. **Settings > Pair phone** shows a QR code and an `adb` command for the Agent (docs/protocol.md section 2). Codes are single use and expire after 15 minutes. The `adb` command is for a phone whose screen does not work; it pairs without a tap:
+
+   ```sh
+   adb shell "am start -a android.intent.action.VIEW -d 'hsm://pair?server=https%3A%2F%2F<service-name>.onrender.com&code=<CODE>' --ez auto true"
+   ```
+
+   Copy it as shown: the double quotes keep the `&` in the link away from the phone's shell. To replace an existing pairing without a tap, add `--ez replace true` before the closing quote.
 
 ### 1.4 Telegram alerts
 
@@ -169,7 +177,7 @@ The plan's original hosting option (plan 11): any small Linux VPS with Docker, a
 
 What the files do:
 
-- `deploy/Dockerfile`: multi-stage build of the Dashboard and the Server, production dependencies only, runs as the unprivileged `node` user, data in `/data`, health check on `/healthz`.
+- `deploy/Dockerfile`: multi-stage build of the Dashboard and the Server on `node:22-bookworm-slim`, production dependencies only, runs as the unprivileged `node` user, data in `/data`, health check on `/healthz`.
 - `deploy/docker-compose.yml`: `server` (with `DATABASE_URL=file:/data/hsm.db` on the `hsm-data` volume, `PUBLIC_URL=https://$DOMAIN`, and only the Docker network trusted as a proxy) and `caddy` (ports 80/443).
 - `deploy/Caddyfile`: HTTPS reverse proxy, WebSockets included.
 
@@ -189,7 +197,7 @@ On Turso, `turso db shell hsm .dump > hsm-backup.sql` makes a logical backup wit
 
 ## 5. Local development
 
-Requires Node.js 20.19 or newer (`.nvmrc`).
+Requires Node.js 22 (`.nvmrc`; at least 22.12). Node 20.19 or newer also builds and runs the Server and the Dashboard (Vite 8 needs `^20.19` or `>=22.12`, the root `package.json` `engines`), but the test runner (Vitest 5) needs Node 22.12 or newer.
 
 ```sh
 npm install
@@ -236,9 +244,16 @@ All variables are documented with examples in [`deploy/.env.example`](../deploy/
 | `CORS_ORIGINS` | none | Extra browser origins for the API |
 | `WEB_DIST` | `<repo>/web/dist` | Built Dashboard |
 | `LOG_LEVEL` | `info` | Log verbosity |
-| `TRUST_PROXY` | `true` | Proxy headers: `true`, `false`, or trusted ranges |
+| `TRUST_PROXY` | `true` (`1` in `render.yaml`) | Proxy headers: hop count, `true`, `false`, or trusted ranges |
 
-With `TRUST_PROXY=true` the client IP used for login rate limits is the left-most `X-Forwarded-For` entry. Behind Caddy on Docker the compose file narrows trust to the private network instead. Per-username lockout (5 failures, 15 minutes) applies regardless of IP.
+`TRUST_PROXY` decides which `X-Forwarded-For`, `X-Forwarded-Proto` and `X-Forwarded-Host` headers the Server believes. The client IP feeds the login and pairing rate limits and the logs.
+
+- **A hop count** (`1` on Render): the Server trusts exactly that many proxies, so the client IP is the entry that many places from the right of `X-Forwarded-For`. With `1` it is the right-most entry, the one Render's proxy appended. A client can put anything in front of it (`X-Forwarded-For: 1.2.3.4` arrives as `1.2.3.4, <real IP>`), but cannot change it. Fastify 5 itself treats a number as "trust nothing", so the Server turns the count into a trust function.
+- **`true`** (default when unset): every proxy is trusted and the client IP is the left-most entry, which the client chose. Fine for local development; do not use it on a public server.
+- **A list** of addresses or ranges (`loopback,linklocal,uniquelocal`, CIDRs): only those peers are proxies. The Docker Compose file uses this, because Caddy talks to the Server over the private Docker network.
+- **`false`** or `0`: headers are ignored (the Server faces the internet directly).
+
+To check the value on a deployment, compare the `ip` in the Server's `agent connected` log line with the phone's public IPv4 on the Dashboard (`net.public_ipv4`, when the phone uses IPv4). If every client shows the same address that belongs to the hosting provider, the chain has one more proxy hop: raise the count by one. Per-username lockout (5 failures, 15 minutes) applies regardless of IP.
 
 ### 6.2 Endpoints
 

@@ -11,6 +11,16 @@ export const MAX_BAD_MESSAGES = 10;
 /** Re-push settings when a heartbeat reports an old version, at most this often. */
 const SETTINGS_REPUSH_MS = 60_000;
 
+/**
+ * The Kotlin Agent omits null fields (docs/protocol.md section 1: missing == null). FinderLive's
+ * required `number | null` fields are filled in so Dashboards always get the contract shape.
+ */
+export function normalizeFinderLive(live: Plain): FinderLive {
+  const score = isNum(live.score) ? live.score : null;
+  const scoreRaw = isNum(live.score_raw) ? live.score_raw : null;
+  return { ...live, score, score_raw: scoreRaw } as unknown as FinderLive;
+}
+
 /** WS /ws/agent (docs/protocol.md section 3). */
 export function handleAgentSocket(ctx: AppContext, socket: WebSocket, req: FastifyRequest): void {
   const token = parseBearer(req.headers.authorization);
@@ -106,7 +116,7 @@ export function handleAgentSocket(ctx: AppContext, socket: WebSocket, req: Fasti
         return;
       case 'finder_live':
         if (isPlainObject(msg.live)) {
-          ctx.hub.broadcastDevice(dev.id, { t: 'finder_live', device_id: dev.id, live: msg.live as unknown as FinderLive });
+          ctx.hub.broadcastDevice(dev.id, { t: 'finder_live', device_id: dev.id, live: normalizeFinderLive(msg.live) });
         }
         return;
       case 'batch':

@@ -3,8 +3,9 @@
 # Server + built Dashboard in one image, for a VPS (deploy/docker-compose.yml puts Caddy in front).
 # Build from the repository root:  docker build -f deploy/Dockerfile -t hotspot-monitor .
 # Debian slim rather than Alpine: @libsql/client ships prebuilt glibc binaries.
+# Node 22 (latest 22.x): Vite 8 needs ^20.19 or >=22.12, like render.yaml and .nvmrc.
 
-ARG NODE_IMAGE=node:20-bookworm-slim
+ARG NODE_IMAGE=node:22-bookworm-slim
 
 # --- 1. build web/dist and server/dist ------------------------------------------------------------
 FROM ${NODE_IMAGE} AS build

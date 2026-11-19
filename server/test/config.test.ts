@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { ConfigError, loadConfig } from '../src/config.js';
+import { ConfigError, loadConfig, trustProxyOption } from '../src/config.js';
 
 describe('loadConfig', () => {
   it('has local-development defaults', () => {
@@ -43,6 +43,25 @@ describe('loadConfig', () => {
       logLevel: 'warn',
     });
     expect(loadConfig({ TRUST_PROXY: 'loopback,uniquelocal' }).trustProxy).toBe('loopback,uniquelocal');
+  });
+
+  it('reads TRUST_PROXY as a hop count, a boolean or a list', () => {
+    expect(loadConfig({ TRUST_PROXY: '1' }).trustProxy).toBe(1);
+    expect(loadConfig({ TRUST_PROXY: ' 2 ' }).trustProxy).toBe(2);
+    expect(loadConfig({ TRUST_PROXY: '0' }).trustProxy).toBe(false);
+    expect(loadConfig({ TRUST_PROXY: 'TRUE' }).trustProxy).toBe(true);
+    expect(loadConfig({ TRUST_PROXY: 'off' }).trustProxy).toBe(false);
+    expect(loadConfig({ TRUST_PROXY: '10.0.0.0/8, 127.0.0.1' }).trustProxy).toBe('10.0.0.0/8, 127.0.0.1');
+    expect(() => loadConfig({ TRUST_PROXY: '500' })).toThrow(ConfigError);
+  });
+
+  it('turns a hop count into a trust function (Fastify 5 ignores numbers)', () => {
+    const fn = trustProxyOption(1);
+    expect(typeof fn).toBe('function');
+    const trust = fn as (addr: string, hop: number) => boolean;
+    expect([trust('10.0.0.1', 0), trust('2.2.2.2', 1)]).toEqual([true, false]);
+    expect(trustProxyOption(true)).toBe(true);
+    expect(trustProxyOption('loopback')).toBe('loopback');
   });
 
   it('falls back to RENDER_EXTERNAL_URL for the public URL', () => {

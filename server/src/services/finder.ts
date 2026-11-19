@@ -14,6 +14,19 @@ const Stats = z.looseObject({
   samples: z.number(),
 });
 
+/**
+ * A `number | null` field the Kotlin Agent omits when null (explicitNulls = false): missing and
+ * null mean the same (docs/protocol.md section 1), and the stored copy always carries null.
+ */
+const nullNum = z.number().nullable().default(null);
+
+const SpeedRunSchema = z.looseObject({
+  down_mbps: nullNum,
+  up_mbps: nullNum,
+  ping_ms: nullNum,
+  jitter_ms: nullNum,
+});
+
 /** Enough structure for ranking, baseline comparison and the Dashboard; extra fields pass through. */
 export const FinderSpotSchema = z.looseObject({
   id: z.string().min(1).max(100),
@@ -31,9 +44,11 @@ export const FinderSpotSchema = z.looseObject({
   speed: z
     .array(
       z.looseObject({
-        down_mbps: z.number().nullable(),
-        up_mbps: z.number().nullable(),
-        runs: z.array(z.unknown()).default([]),
+        down_mbps: nullNum,
+        up_mbps: nullNum,
+        ping_ms: nullNum,
+        jitter_ms: nullNum,
+        runs: z.array(SpeedRunSchema).default([]),
       }),
     )
     .default([]),

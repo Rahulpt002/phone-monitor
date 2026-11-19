@@ -1,6 +1,7 @@
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import Fastify from 'fastify';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import type { HsmServer } from '../src/server.js';
 import { makeServer } from './helpers.js';
@@ -107,5 +108,62 @@ describe('static Dashboard, security headers and CORS', () => {
       }
     }
     expect(last).toBe(429);
+  });
+});
+
+describe('client IP behind a proxy (TRUST_PROXY)', () => {
+  const XFF = '1.1.1.1, 2.2.2.2';
+  /** request.ip and request.protocol for one request that arrives from 10.1.2.3 with XFF. */
+  async function seen(trustProxy: boolean | number | string): Promise<{ ip: string; protocol: string }> {
+    const { server } = await makeServer({ config: { trustProxy } });
+    try {
+      server.app.get('/test/ip', async (req) => ({ ip: req.ip, protocol: req.protocol }));
+      const r = await server.app.inject({
+        method: 'GET',
+        url: '/test/ip',
+        headers: { 'x-forwarded-for': XFF, 'x-forwarded-proto': 'https' },
+        remoteAddress: '10.1.2.3',
+      });
+      return JSON.parse(r.body) as { ip: string; protocol: string };
+    } finally {
+      await server.close();
+    }
+  }
+
+  it('Fastify 5 on its own treats a numeric trustProxy as "trust nothing"', async () => {
+    // Its types no longer even allow a number; at runtime lib/request.js maps one to "trust nothing".
+    const app = Fastify({ trustProxy: 1 as unknown as boolean });
+    app.get('/ip', async (req) => ({ ip: req.ip }));
+    const r = await app.inject({ method: 'GET', url: '/ip', headers: { 'x-forwarded-for': XFF }, remoteAddress: '10.1.2.3' });
+    expect(JSON.parse(r.body)).toEqual({ ip: '10.1.2.3' });
+    await app.close();
+  });
+
+  it('TRUST_PROXY=1 takes the right-most X-Forwarded-For entry (the one the proxy appended)', async () => {
+    expect(await seen(1)).toEqual({ ip: '2.2.2.2', protocol: 'https' });
+    expect(await seen(2)).toEqual({ ip: '1.1.1.1', protocol: 'https' });
+    // true takes the left-most entry, which the client chose; false ignores the headers.
+    expect(await seen(true)).toEqual({ ip: '1.1.1.1', protocol: 'https' });
+    expect(await seen(false)).toEqual({ ip: '10.1.2.3', protocol: 'http' });
+  });
+
+  it('a client cannot dodge the login rate limit by forging X-Forwarded-For', async () => {
+    const { server } = await makeServer({ config: { trustProxy: 1 } });
+    try {
+      let last = 0;
+      for (let i = 0; i < 12; i++) {
+        const r = await server.app.inject({
+          method: 'POST',
+          url: '/api/auth/login',
+          headers: { 'content-type': 'application/json', 'x-forwarded-for': `198.51.100.${i}, 203.0.113.9` },
+          payload: JSON.stringify({ username: `nobody${i}`, password: 'x' }),
+          remoteAddress: '10.1.2.3',
+        });
+        last = r.statusCode;
+      }
+      expect(last).toBe(429);
+    } finally {
+      await server.close();
+    }
   });
 });

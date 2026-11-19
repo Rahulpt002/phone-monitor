@@ -6,7 +6,7 @@ import { PROTOCOL } from '@hsm/shared';
 import Fastify, { LogController, type FastifyError, type FastifyInstance, type FastifyServerOptions } from 'fastify';
 import { makeGuards } from './auth/guard.js';
 import { AuthService } from './auth/service.js';
-import type { Config } from './config.js';
+import { trustProxyOption, type Config } from './config.js';
 import type { AppContext } from './context.js';
 import { Db } from './db/client.js';
 import { migrate } from './db/migrations.js';
@@ -86,7 +86,7 @@ export async function buildServer(config: Config, options: BuildOptions = {}): P
   const clock = options.clock ?? systemClock;
   const app = Fastify({
     logger: options.logger ?? defaultLogger(config),
-    trustProxy: config.trustProxy,
+    trustProxy: trustProxyOption(config.trustProxy),
     bodyLimit: BODY_LIMIT,
     // Requests are logged by the onResponse hook below (one line, no headers).
     logController: new LogController({ disableRequestLogging: true }),

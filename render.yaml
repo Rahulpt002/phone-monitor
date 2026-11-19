@@ -1,8 +1,7 @@
 # Render Blueprint: one free web service that runs the Server and serves the built Dashboard.
 #
-# Create it in the Render dashboard: New > Blueprint > pick this repository and set
-# "Blueprint file path" to deploy/render.yaml (or copy this file to the repository root).
-# Step-by-step guide: docs/deploy.md.
+# Create it in the Render dashboard: New > Blueprint > pick this repository. Render reads this
+# file from the repository root by default. Step-by-step guide: docs/deploy.md section 1.
 #
 # Render's free tier has no persistent disk, so the database is Turso (libSQL):
 # DATABASE_URL=libsql://<db>-<org>.turso.io plus DATABASE_AUTH_TOKEN.
@@ -15,21 +14,26 @@ services:
     region: singapore
     branch: main
     autoDeploy: true
+    # Runs from the repository root: installs every workspace, builds web/dist then server/dist.
     # Do not set NODE_ENV=production here: npm ci would skip the dev dependencies the build needs.
     buildCommand: npm ci && npm run build
+    # node server/dist/index.js (root package.json); serves web/dist and listens on Render's PORT.
     startCommand: npm start
     healthCheckPath: /healthz
     envVars:
+      # Latest Node 22 LTS. Vite 8 needs ^20.19 or >=22.12 (root package.json "engines", .nvmrc).
       - key: NODE_VERSION
-        value: "20"
+        value: "22"
       - key: HOST
         value: 0.0.0.0
       - key: LOG_LEVEL
         value: info
       - key: SESSION_TTL_DAYS
         value: "30"
+      # Render's proxy is one hop: the client IP is the right-most X-Forwarded-For entry, which a
+      # client cannot forge (login rate limits are per IP). See docs/deploy.md section 6.1.
       - key: TRUST_PROXY
-        value: "true"
+        value: "1"
       # Required secrets (Render asks for them when the Blueprint is created).
       - key: DATABASE_URL
         sync: false

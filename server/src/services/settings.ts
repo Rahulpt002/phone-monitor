@@ -26,6 +26,13 @@ const alertEnabledShape = Object.fromEntries(ALERT_KINDS.map((k) => [k, z.boolea
  * Full validation of the Settings shape (shared/src/settings.ts). Bounds keep a typo from making
  * the phone misbehave (for example a 0 s heartbeat) while still allowing low test thresholds
  * (plan Phase 4: "lowered test thresholds trigger the heat and power rules").
+ *
+ * Durations (*_s, *_min, *_h), percentages (*_pct), distances (*_m), counts and days are integers
+ * (the Agent reads most of them into Kotlin Int/Long fields). Score weights, temperatures (*_c),
+ * tilt degrees and quota_gb may be fractional.
+ *
+ * profile_override is replaced as a whole by a PUT (mergeSettings), so one request can remove
+ * keys from it; here it only has to be an object (or null) no larger than 64 KiB.
  */
 export const SettingsSchema = z
   .strictObject({
@@ -62,7 +69,7 @@ export const SettingsSchema = z
       radio_rest_s: int(10, 86_400),
       weak_power_min: int(1, 1440),
       move_tilt_deg: num(1, 180),
-      move_distance_m: num(1, 100_000),
+      move_distance_m: int(1, 100_000),
       max_reboots: int(0, 50),
       reboot_window_h: int(1, 168),
       weekly_reboot: z.strictObject({
@@ -139,6 +146,12 @@ export function validateSettings(s: unknown): { ok: true; settings: Settings } |
  */
 export function normalizeStoredSettings(raw: unknown): Settings {
   const merged = mergeSettings(DEFAULT_SETTINGS, isPlainObject(raw) ? raw : {});
+  // move_distance_m used to accept fractions; round an old stored value instead of failing the
+  // whole object (which would reset every setting to the defaults).
+  const dist: unknown = merged.watchdog?.move_distance_m;
+  if (typeof dist === 'number' && Number.isFinite(dist) && !Number.isInteger(dist)) {
+    merged.watchdog = { ...merged.watchdog, move_distance_m: Math.round(dist) };
+  }
   const v = validateSettings(merged);
   return v.ok ? v.settings : structuredClone(DEFAULT_SETTINGS);
 }
