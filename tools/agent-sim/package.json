@@ -1,0 +1,23 @@
+{
+  "name": "@hsm/agent-sim",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Simulated hotspot phone that speaks the Agent protocol, for developing and testing without a real phone.",
+  "scripts": {
+    "start": "tsx src/index.ts",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "ws": "^8.18.0"
+  },
+  "devDependencies": {
+    "@hsm/shared": "*",
+    "@types/node": "^22.10.2",
+    "@types/ws": "^8.5.13",
+    "tsx": "^4.19.2",
+    "typescript": "~5.9.3",
+    "vitest": "^5.1.1"
+  }
+}

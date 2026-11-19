@@ -1,0 +1,62 @@
+[
+  {
+    "rsrp": -80,
+    "sinr": 25,
+    "rsrq": -8,
+    "score": 100
+  },
+  {
+    "rsrp": -120,
+    "sinr": -5,
+    "rsrq": -20,
+    "score": 0
+  },
+  {
+    "rsrp": -94,
+    "sinr": 12.5,
+    "rsrq": -11,
+    "score": 64
+  },
+  {
+    "rsrp": -100,
+    "sinr": 0,
+    "rsrq": -15,
+    "score": 33.3
+  },
+  {
+    "rsrp": -70,
+    "sinr": 30,
+    "rsrq": -3,
+    "score": 100
+  },
+  {
+    "rsrp": -130,
+    "sinr": -10,
+    "rsrq": -25,
+    "score": 0
+  },
+  {
+    "rsrp": -90,
+    "sinr": null,
+    "rsrq": -12,
+    "score": 39.6
+  },
+  {
+    "rsrp": -90,
+    "sinr": 10,
+    "rsrq": null,
+    "score": 48.7
+  },
+  {
+    "rsrp": null,
+    "sinr": 10,
+    "rsrq": -10,
+    "score": null
+  },
+  {
+    "rsrp": -85.5,
+    "sinr": 17.25,
+    "rsrq": -9.75,
+    "score": 80.6
+  }
+]

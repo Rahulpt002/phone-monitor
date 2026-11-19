@@ -1,0 +1,37 @@
+{
+  "name": "@hsm/server",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Relay between Agent and Dashboard: WebSocket hub, history, alerts, auth (plan section 8).",
+  "main": "dist/index.js",
+  "scripts": {
+    "dev": "tsx watch src/index.ts",
+    "build": "tsup",
+    "start": "node dist/index.js",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@fastify/cors": "^11.4.3",
+    "@fastify/rate-limit": "^11.2.2",
+    "@fastify/static": "^10.1.11",
+    "@fastify/websocket": "^11.3.7",
+    "@libsql/client": "^0.18.0",
+    "fastify": "^5.12.8",
+    "web-push": "^3.6.7",
+    "ws": "^8.18.0",
+    "zod": "^4.6.7"
+  },
+  "devDependencies": {
+    "@hsm/shared": "*",
+    "@types/node": "^22.10.2",
+    "@types/web-push": "^3.6.4",
+    "@types/ws": "^8.5.13",
+    "pino-pretty": "^13.0.0",
+    "tsup": "^8.5.1",
+    "tsx": "^4.19.2",
+    "typescript": "~5.9.3",
+    "vitest": "^5.1.1"
+  }
+}

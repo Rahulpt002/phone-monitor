@@ -1,0 +1,100 @@
+{
+  "telemetry": {
+    "heartbeat_s": 30,
+    "fast_active_s": 5,
+    "fast_idle_s": 60,
+    "mirror_s": 1,
+    "slow_s": 60,
+    "internet_check_s": 15,
+    "probe_url": "https://connectivitycheck.gstatic.com/generate_204",
+    "ping_host": "1.1.1.1",
+    "dns_host": "google.com",
+    "public_ip_url": "https://api.ipify.org",
+    "public_ip_every_s": 900
+  },
+  "watchdog": {
+    "enabled": true,
+    "internet_fail_s": 90,
+    "data_off_s": 5,
+    "airplane_after_s": 180,
+    "airplane_off_s": 10,
+    "reboot_after_s": 600,
+    "reboot_retry_s": 3600,
+    "tether_fix": true,
+    "tether_fix_after_s": 20,
+    "usb_function": "rndis",
+    "charge_limit_pct": 60,
+    "charge_resume_drop_pct": 10,
+    "temp_warn_c": 40,
+    "temp_stop_charge_c": 45,
+    "temp_resume_c": 40,
+    "temp_radio_rest_c": 50,
+    "radio_rest_s": 600,
+    "weak_power_min": 30,
+    "move_tilt_deg": 15,
+    "move_distance_m": 100,
+    "max_reboots": 3,
+    "reboot_window_h": 6,
+    "weekly_reboot": {
+      "enabled": false,
+      "day": 0,
+      "time": "04:00"
+    }
+  },
+  "commands": {
+    "revert_after_s": 120,
+    "expiry_s": 60,
+    "allow_power_off": false
+  },
+  "alerts": {
+    "offline_after_s": 180,
+    "low_battery_pct": 20,
+    "signal_drop_pct": 60,
+    "signal_drop_min": 15,
+    "cell_change_min": 30,
+    "tether_down_min": 2,
+    "quota_steps_pct": [
+      80,
+      90,
+      100
+    ],
+    "cooldown_min": 30,
+    "enabled": {
+      "offline": true,
+      "back_online": true,
+      "weak_power": true,
+      "low_battery": true,
+      "hot": true,
+      "signal_drop": true,
+      "cell_changed": true,
+      "tether_down": true,
+      "usb_power_lost": true,
+      "data_quota": true,
+      "moved": true,
+      "watchdog": true,
+      "carrier_sms": true,
+      "server_test": true
+    },
+    "channels": {
+      "telegram": true,
+      "push": true
+    }
+  },
+  "plan": {
+    "quota_gb": 0,
+    "cycle_start_day": 1
+  },
+  "finder": {
+    "w_sinr": 0.45,
+    "w_rsrp": 0.35,
+    "w_rsrq": 0.2,
+    "smooth_s": 5,
+    "spot_test_s": 30,
+    "speed_runs": 3,
+    "speed_down_url": "https://speed.cloudflare.com/__down?bytes={bytes}",
+    "speed_up_url": "https://speed.cloudflare.com/__up",
+    "speed_bytes": 10000000,
+    "speak_every_s": 4
+  },
+  "profile_override": null
+}
