@@ -4,7 +4,7 @@
   "version": "0.1.0",
   "description": "Outdoor hotspot phone: remote monitoring and control (Server, Dashboard PWA, shared types, agent simulator). The Android Agent lives in agent/ and builds with Gradle.",
   "workspaces": ["shared", "server", "web", "tools/agent-sim"],
-  "engines": { "node": ">=20.11" },
+  "engines": { "node": "^20.19.0 || >=22.12.0" },
   "scripts": {
     "build": "npm run build -w web && npm run build -w server",
     "dev:server": "npm run dev -w server",
@@ -12,6 +12,7 @@
     "sim": "npm run start -w tools/agent-sim --",
     "typecheck": "npm run typecheck --workspaces --if-present",
     "test": "npm run test --workspaces --if-present",
-    "start": "node server/dist/index.js"
+    "start": "node server/dist/index.js",
+    "e2e": "node tools/e2e/run.mjs"
   }
 }
