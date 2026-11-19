@@ -21,7 +21,7 @@ export type ApiErrorCode =
   | 'bad_request'
   | 'unauthorized' // no / invalid / expired session
   | 'forbidden' // role does not allow it
-  | 'totp_enrollment_required' // admin without TOTP tried a write action
+  | 'totp_enrollment_required' // user without TOTP tried anything but enrollment
   | 'reauth_required' // password missing or wrong for a reauth command
   | 'confirmation_required' // `confirmed: true` missing for a confirm command
   | 'locked' // too many failed logins (HTTP 429)
@@ -38,29 +38,49 @@ export interface ApiError {
 
 // --- auth -------------------------------------------------------------------------------------
 // POST /auth/login (public, rate-limited, lockout after 5 failures for 15 min)
+//
+// Lockout keys (docs/protocol.md 7): failures count per username and per IP. A browser that
+// presents a valid `device_token` for that user (issued by its last full sign-in) counts its
+// failures on that token instead of the username, so wrong passwords from strangers cannot lock a
+// known browser out of signing in.
 export interface LoginRequest {
   username: string;
   password: string;
+  /** From the last SessionResponse of this browser for this user, if any. */
+  device_token?: string;
 }
 export type LoginResponse =
-  | { totp_required: false; token: string; user: UserInfo; expires_at: string }
+  | { totp_required: false; token: string; user: UserInfo; expires_at: string; device_token?: string }
   | { totp_required: true; pending_token: string }; // pending_token valid 5 min
 
 // POST /auth/totp (public)
 export interface TotpLoginRequest {
   pending_token: string;
   code: string;
+  /** Same as LoginRequest.device_token. */
+  device_token?: string;
 }
 export interface SessionResponse {
   token: string;
   user: UserInfo;
   expires_at: string;
+  /**
+   * Known-device token, issued on every full sign-in (the one presented is replaced). The browser
+   * keeps it per username and sends it with its next sign-in. Valid 180 days; dropped when the
+   * user's password changes or all of the user's sessions are revoked.
+   */
+  device_token?: string;
 }
 
 // GET /auth/me
 export interface MeResponse {
   user: UserInfo;
-  /** True for admins without TOTP: the Dashboard must lead them to enroll before any write. */
+  /**
+   * True for any user (admin or viewer) without TOTP (plan 10: password plus TOTP for every
+   * Dashboard login). Until enrolled, the session may only call GET /auth/me, POST /auth/logout,
+   * POST /auth/password, POST /auth/totp/setup, POST /auth/totp/enable and GET /config; everything
+   * else (REST and the dashboard socket) answers 403 totp_enrollment_required.
+   */
   totp_enrollment_required: boolean;
 }
 
@@ -76,14 +96,28 @@ export interface TotpSetupResponse {
 
 // --- users (admin) ----------------------------------------------------------------------------
 // GET /users -> UserInfo[]
-// POST /users { username, password, role } -> UserInfo
-// PATCH /users/:id { role?, password?, reset_totp? } -> UserInfo
-//   reset_totp: true clears that user's authenticator and revokes their sessions (lost phone).
-// DELETE /users/:id -> 204 (cannot delete the last admin or yourself)
+// POST /users CreateUserRequest -> 201 UserInfo
+// PATCH /users/:id UpdateUserRequest -> UserInfo
+//   reset_totp: true clears that user's authenticator, revokes their sessions and deletes their
+//   push subscriptions (lost phone).
+// DELETE /users/:id { reauth_password } -> 204 (cannot delete the last admin or yourself)
+// Every write here needs `reauth_password` = the acting admin's own password (401 reauth_required).
+// An admin cannot change their own password or reset their own TOTP here (400 bad_request):
+// that goes through POST /auth/password and POST /auth/totp/disable, which need the current password.
 export interface CreateUserRequest {
   username: string;
   password: string;
   role: Role;
+  reauth_password: string;
+}
+export interface UpdateUserRequest {
+  role?: Role;
+  password?: string; // new password for that user (min 10 chars)
+  reset_totp?: true;
+  reauth_password: string;
+}
+export interface DeleteUserRequest {
+  reauth_password: string;
 }
 
 // --- pairing ----------------------------------------------------------------------------------
@@ -97,9 +131,12 @@ export interface PairCodeResponse {
   /** Opened by the phone's camera (QR) or by ADB; the Agent's PairActivity handles it. */
   deep_link: string; // hsm://pair?server=<urlencoded base url>&code=<code>
   /**
-   * For a phone with a dead screen. The inner command is quoted so the phone's shell does not
-   * split the link at '&'; `--ez auto true` makes PairActivity pair without a tap:
-   * adb shell "am start -a android.intent.action.VIEW -d '<deep_link>' --ez auto true"
+   * For a phone with a dead screen. It targets the activity-alias `.ui.AdbPair`, which is guarded
+   * by android.permission.DUMP so only adb (shell uid) or root can start it; only that entry point
+   * honours `--ez auto true` (pair without a tap) and `--ez replace true`. The browsable hsm://pair
+   * link (QR code) always needs a tap on the phone. The inner command is quoted so the phone's
+   * shell does not split the link at '&':
+   * adb shell "am start -n com.hotspotmonitor.agent/.ui.AdbPair -a android.intent.action.VIEW -d '<deep_link>' --ez auto true"
    */
   adb_command: string;
 }
@@ -155,8 +192,16 @@ export interface StoredEvent extends AgentEvent {
 
 // --- settings ---------------------------------------------------------------------------------
 // GET /settings?device_id= -> SettingsResponse
-// PUT /settings (admin) { device_id?, settings: <partial Settings> } -> SettingsResponse
-//   deep-merged over the current settings, validated, version += 1, pushed to the Agent.
+// PUT /settings (admin) PutSettingsRequest -> SettingsResponse
+//   deep-merged over the current settings (profile_override replaces whole), validated,
+//   version += 1, pushed to the Agent, and recorded as a 'settings_changed' event (audit).
+//   A change to profile_override (it holds root shell templates) needs `password`
+//   (the admin's own; 401 reauth_required without it).
+export interface PutSettingsRequest {
+  device_id?: string;
+  settings: Partial<Settings> | Record<string, unknown>;
+  password?: string;
+}
 export interface SettingsResponse {
   device_id: string;
   settings: Settings;

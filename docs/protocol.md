@@ -16,6 +16,7 @@ The TypeScript types in [`shared/src/`](../shared/src) are the source of truth. 
 ## 1. General rules
 
 - REST endpoints live under `/api` (for example `POST /api/auth/login`). The paths in `api.ts` comments omit that prefix. Exceptions are `GET /healthz` and the two WebSockets, `/ws/agent` and `/ws/dashboard`.
+- **Sign-in lockout:** 5 failed sign-ins (password or TOTP step) within 15 min lock the username and the IP for 15 min (429 `locked`); attempts count as they start, so a concurrent burst gets at most 5 checks. Every full sign-in returns a `device_token` (`SessionResponse`, valid 180 days, replaced on each sign-in, dropped when the user's password changes or their sessions are revoked). A browser that sends a valid one for that user (`LoginRequest` / `TotpLoginRequest.device_token`) counts its failures on that token and its IP instead of the username, so wrong passwords from strangers cannot lock a known browser out; a stolen token still gets only 5 guesses per 15 min. It is not a credential: password and code are still required.
 
 - One JSON object per WebSocket text frame, with a `t` field naming the type.
 - Receivers **ignore unknown `t` values and unknown fields**.
@@ -28,7 +29,7 @@ The TypeScript types in [`shared/src/`](../shared/src) are the source of truth. 
 
 1. An admin presses **Pair phone** in the Dashboard → `POST /api/pair/codes` → an 8-character one-time code (valid 15 min) plus:
    - `deep_link`: `hsm://pair?server=<url-encoded https base URL>&code=<code>`, shown as a QR code. Any camera app that reads QR codes opens it in the Agent.
-   - `adb_command`: `adb shell "am start -a android.intent.action.VIEW -d '<deep_link>' --ez auto true"` for a phone with a dead screen. The inner command is quoted so the phone's shell does not split the link at `&`; `--ez auto true` pairs without a tap (add `--ez replace true` to replace an existing pairing).
+   - `adb_command`: `adb shell "am start -n com.hotspotmonitor.agent/.ui.AdbPair -a android.intent.action.VIEW -d '<deep_link>' --ez auto true"` for a phone with a dead screen. The inner command is quoted so the phone's shell does not split the link at `&`. `.ui.AdbPair` is an activity-alias guarded by `android.permission.DUMP`, so only adb (shell uid) or root can start it; only this entry point honours `--ez auto true` (pair without a tap) and `--ez replace true` (replace an existing pairing). The browsable `hsm://pair` link (QR code, other apps, web pages) ignores both extras and always needs a tap on the phone, plus a second confirmation when it would replace an existing pairing.
    - The Agent's local UI also has a manual form (server URL + code).
 2. The Agent calls `POST <server>/api/pair {code, device: DeviceInfo}` → `{device_id, device_token, ws_url, server_url}`.
 3. The Agent stores `device_token` encrypted with an Android Keystore key and never shows or logs it. The Server keeps only its SHA-256.
@@ -44,9 +45,12 @@ The TypeScript types in [`shared/src/`](../shared/src) are the source of truth. 
 - The Server's first message is **`hello`**: `server_time`, `device_id`, `settings`, `settings_version`, `rates`.
   - **Clock offset** = `server_time − local now` at receipt. The Agent uses it for command expiry (3.5). It does not change the phone's clock.
   - If `settings_version` differs from the version the Agent last applied, the Agent applies and persists the new settings and emits `settings_applied` event.
-- Right after `hello`, the Agent sends a `static` telemetry message (device + capabilities), then fresh `slow` and `fast` readings, and starts draining its outbox.
+- Right after `hello`, the Agent enqueues a `static` telemetry message (device + capabilities) and fresh `slow` and `fast` readings, and starts draining its outbox. Because acks are cumulative (3.2), these go out **behind any backlog** in `seq` order; with a large backlog they reach the Server after `live_window_s` and are stored without being relayed live. The Dashboard then shows the last known state until the backlog has drained.
 - Reconnect uses exponential backoff with jitter: 2 s, 4 s, 8 s … up to 60 s. Backoff resets after a connection has stayed up for 60 s. Reconnect immediately on an Android network-available callback.
 - OkHttp `pingInterval(20 s)` detects dead sockets. The app-level `heartbeat` message is separate (3.3).
+- The Agent's 30 s `hello` timeout starts when the socket has opened. The upgrade itself (DNS, TCP, TLS, a free-tier Server waking up) has a separate 100 s backstop, so a slow wake-up is not cut short.
+- The Agent persists the last clock offset and uses it, marked "not synced", until the next `hello`. Every `ts`, `at` and `revert_deadline` it sends is in offset-corrected (Server) time; the phone's own clock is only used for local timers.
+- `/ws/agent` negotiates `permessage-deflate` (messages over 1 KiB are compressed; OkHttp supports it). `/ws/dashboard` does not offer compression.
 
 ### 3.2 Outbox, `seq` and `ack` (plan 6.1 "Sync")
 
@@ -60,11 +64,13 @@ These message types are **buffered**: `telemetry`, `event`, `finder_spot`, `find
    - events: unique `event.id`
    - spots: upsert by `spot.id`
    - sms: unique `sms.id`
-   - command reports: applied idempotently. A report never moves a command backwards, so a late `cmd_ack` after `cmd_result` is ignored.
+   - command reports: applied idempotently. A report never moves a command backwards, so a late `cmd_ack` after `cmd_result` is ignored. Reports for a command that is no longer in the Server's memory (after a restart) are matched against the stored row, so the outcome is the same whether reports arrive in one `batch` or one by one.
+   - The Server acks only what it stored. A write that fails for a reason other than the item itself (database outage, lost commit response) is not acked, so the Agent re-sends and the duplicate rules above apply; an item the database refuses as invalid (constraint, type or size error) is dropped and acked.
 5. Outbox cap is 50,000 rows. When full, the oldest `fast` telemetry is dropped first. Events and command reports are never dropped.
 6. These are **not** buffered: `heartbeat`, `probe`, `finder_live`.
+7. `heartbeat.outbox` is the number of buffered rows not yet acked, including rows already sent but still waiting for their ack. The Server uses it to decide when a backlog has drained (6).
 
-A `telemetry` message older than `PROTOCOL.live_window_s` (120 s) by Server time is backlog: it is stored and rolled up but not relayed live to Dashboards. The Server updates its "current state" only from newer timestamps, so backlog never overwrites fresh values.
+A `telemetry` message older than `PROTOCOL.live_window_s` (120 s) by Server time is backlog: it is stored and rolled up but not relayed live to Dashboards. The Server updates its "current state" only from newer timestamps, so backlog never overwrites fresh values. A reading dated more than 120 s **ahead** of the Server clock is stored with its own `ts` but merged into the current state as if taken now and not relayed live, so a phone clock in the future cannot freeze the state.
 
 ### 3.3 Sending tiers (plan 8.2)
 
@@ -79,9 +85,13 @@ A `telemetry` message older than `PROTOCOL.live_window_s` (120 s) by Server time
 
 The Server sends `rates` whenever the answer changes, based on which Dashboards are subscribed (5).
 
+**Data budget.** The long lists are not sent every minute when nobody is watching: `heat.zones`, `system.top` and `traffic.per_if` go in the `slow` message every 15 min, or every time while a Dashboard watches the device (`rates.fast_s == fast_active_s`); `radio.neighbours` only while a Dashboard watches. A full `slow` message is sent when a Dashboard opens. Measured from `shared/fixtures` (JSON payload only, before TLS/WebSocket framing, acks and pings, no Dashboard open): about 3.2 MB/day at fixture size (3.6 MB before this trimming) and 3.5 MB/day with every list at its cap (8.4 MB before). The base fields every 60 s dominate, so this is above the plan's ~1 MB target; `permessage-deflate` on `/ws/agent` (3.1) reduces what goes over the wire further.
+
 ### 3.4 Settings
 
-- The Server owns the settings. `PUT /settings` deep-merges, validates, increments `version`, stores, and pushes `{"t":"settings"}` to the Agent if it is connected. Otherwise the Agent gets them in the next `hello`.
+- The Server owns the settings. `PUT /settings` (body `PutSettingsRequest {device_id?, settings, password?}`) deep-merges, validates, increments `version`, stores, and pushes `{"t":"settings"}` to the Agent if it is connected. Otherwise the Agent gets them in the next `hello`. Updates for one device run one at a time, and memory, Dashboards and the Agent see a new version only after it is stored.
+- A change to `profile_override` (it holds root shell templates) needs the admin's own `password`, else 401 `reauth_required` and nothing changes. Sending the same override back unchanged (a full-form save) needs no password.
+- Every successful `PUT` is stored, in the same transaction, as a Server-generated event of kind `settings_changed` with `data: {user, version, changed: [dotted paths], profile_override_changed}`, and broadcast like any other event. Internal changes (for example `charge_limit`, 3.5) do not create one.
 - The Agent persists the last applied settings and version, and ships `DEFAULT_SETTINGS` (identical to `shared/fixtures/settings-default.json`, which a unit test checks). The watchdog works offline with the last applied copy.
 
 ### 3.5 Commands (plan 6.3 and 6.4)
@@ -101,21 +111,28 @@ Dashboard           Server                                   Agent
 ```
 
 - **Queueing:** if the Agent is offline, the Server holds the command and sends it on reconnect. After `commands.expiry_s` (60 s) from `created_at` the Server marks it `expired`. The Agent also rejects a command whose `sent_at` is too old by its offset-corrected clock (rule 6).
+- **Re-delivery:** on Agent connect the Server also re-sends `sent` commands that have no `cmd_ack` yet and are still within `commands.expiry_s` (same `id` and `sent_at`). The Agent never executes a command id twice: for a duplicate it re-queues its latest report (a rejecting `cmd_ack`, or `cmd_ack`, or `cmd_result` plus `cmd_revert` with the armed deadline); for one still running, its `cmd_ack` once it exists. (The simulator skips the re-send while that report is still in its outbox.)
+- **Final timeouts:** `acked` with no result for 30 min plus the command's own `timeout_s` / `off_seconds` / `duration_s`, and `revert_armed` with no report 10 min past `revert_deadline`, become `expired` with a message saying so. This is soft: a late report still applies, but never one that would move the command backwards. The allowed moves are `commandStatusAllowedFrom` / `commandMayMove` in `commands.ts`; the Server guards its writes with them and the Dashboard uses the same table to drop stale copies (so `expired` replaces `acked` or `revert_armed` there too and ends the revert countdown). A report that lands while the Server is writing a timeout wins: the timeout is applied only if the row still has the status it was decided on.
+- **Secret arguments at rest:** rows stored before `secret_args` were blanked are scrubbed by schema migration 3 (every status except `queued` and `sent`).
+- **`charge_limit`** writes `settings.watchdog.charge_limit_pct` only after the Agent reports success (`done` or `revert_armed`), not when the command is created.
+- **Secret arguments:** `CommandSpec.secret_args` (the hotspot `password`) are only in the `cmd` frame to the Agent. The Server never returns them over REST or WebSocket, to any role (POST response, `GET /commands`, live `command`, `pending_reverts`), and blanks them in storage once the command has been acked or reached a final status.
+- **Arguments** are checked by the Server and again by the Agent with the same rules, for example: hotspot `password` 8 to 63 printable ASCII characters; `send_sms.to` an optional `+` and 2 to 20 digits after removing spaces, dots, dashes and parentheses; `ussd.code` matching `^[*#][0-9*#+]{1,63}$`; `finder_spot_test.name` 1 to 64 characters and `orientation` at most 32, without control characters; `shell.timeout_s` and `data_cycle`/`airplane_cycle.off_seconds` 1 to 600.
 - **Checks on the Agent, in order:** expiry → name known and supported in the capability map (`unsupported`) → `power_off` blocked unless `allow_power_off` (`blocked`) → reboot limit: at most `max_reboots` per `reboot_window_h` from any source (`reboot_limit`) → argument validation (`invalid_args`) → conflicting command or watchdog step running (`busy`).
-- **Role checks on the Server:** viewers cannot send commands (403). `admin_only` commands need an admin. `confirm` commands need `confirmed: true`, else 400 `confirmation_required`. `reauth` commands need the user's `password`, else 401 `reauth_required`. An admin without TOTP gets 403 `totp_enrollment_required` for any command or settings write.
+- **Role checks on the Server:** viewers cannot send commands (403). `admin_only` commands need an admin. `confirm` commands need `confirmed: true`, else 400 `confirmation_required`. `reauth` commands need the user's `password`, else 401 `reauth_required`. A session whose user has no TOTP (any role) gets 403 `totp_enrollment_required` for everything except the enrollment endpoints (`api.ts`, plan 10). Failed password re-entries are counted per session (5 per 15 min), separately from sign-in failures.
 - **Audit:** every state change is stored in `commands` and broadcast to Dashboards as `{"t":"command"}`. Agent-local actions (watchdog, local UI, schedule) are reported as `event` kind `command` or `watchdog_action` and stored in the timeline.
 
 #### Auto-revert (rule 1)
 
 The Server sets `revert_after_s` (from `commands.revert_after_s`) and `revert_confirm` on `cmd` when `COMMANDS[name].revertFor(args)` is not null.
 
-1. The Agent records the **undo action** before it applies the change, for example `mobile_data {enabled:true}`. It persists `{command_id, undo, deadline, confirm_mode, applied_at}` in Room, so a revert survives an Agent restart or reboot.
+1. The Agent records the **undo action** before it applies the change, for example `mobile_data {enabled:true}`. It persists `{command_id, undo, deadline, confirm_mode, applied_at}` in Room, in phone wall-clock time, so a revert survives an Agent restart or reboot. On restore the remaining time is capped at the revert window (a clock set back cannot stretch it).
 2. `cmd_result` carries `revert_deadline = applied_at + revert_after_s`.
 3. Confirmation:
    - `agent_link`: from `applied_at + REVERT_SETTLE_S` (10 s), the Agent sends `{"t":"probe","id"}` every 10 s while connected, and once after every reconnect. The first `probe_ack` for a probe sent at or after the settle time confirms the change: the Agent sends `cmd_revert {state:"kept"}`.
    - `dashboard`: the change is kept only when `{"t":"cmd_keep","id"}` arrives. The Server sends it after `POST /commands/:id/keep`.
 4. When the deadline passes without confirmation, the Agent runs the undo action, sends `cmd_revert {state:"reverted"}` (buffered), and emits event `revert`.
-5. At Agent start, any persisted armed revert that is past its deadline is reverted immediately.
+5. At Agent start, persisted armed reverts are restored before any new command that arms a revert, or `cmd_keep`, is handled; any that is past its deadline is reverted immediately.
+6. **Superseding:** a newer command on the same state (`data`: `mobile_data`, `data_cycle`; `airplane`: `airplane_mode`, `airplane_cycle`; `tether`: `usb_tethering`; `network_mode`) ends an earlier armed revert with `cmd_revert {state:"kept", detail:"Superseded by a newer <label> command (<id>)"}`, without running its undo and without a `revert` event. If the newer command arms a revert itself, it inherits the earlier undo, so an unconfirmed chain still returns to the last state that worked.
 
 ### 3.6 Probe
 
@@ -134,9 +151,10 @@ score  = round1(100 * (w_sinr*n_sinr + w_rsrp*n_rsrp + w_rsrq*n_rsrq))   // miss
 
 ## 5. Dashboard socket: `WS /ws/dashboard`
 
-1. The client connects and must send `{"t":"auth","token":"<session token>"}` within 10 s. The Server replies `auth_ok {user}` or `auth_failed` and closes (4001).
+1. The client connects and must send `{"t":"auth","token":"<session token>"}` within 10 s. The Server replies `auth_ok {user}`, or `auth_failed` and closes with 4001 when the session definitely does not exist, has expired or has no TOTP enrolled yet (`message: "totp_enrollment_required"`; the Dashboard only opens the socket after enrollment). If the session lookup itself fails or times out (database trouble), the Server closes with **1013** (try again later) and the client keeps its token and reconnects with backoff.
+   - When the user's role changes (or they turn TOTP off), the Server closes their sockets with **4004**; the session stays valid, and the client reconnects, re-sends `auth` and refetches `GET /api/auth/me` without signing out.
 2. The client sends `{"t":"subscribe","device_id":"d_…","finder":false}` and sends it again whenever the screen changes (`finder:true` only while the Finder screen is visible).
-3. The Server sends `snapshot {device: DeviceSnapshot}` for the subscribed device (or for every device when `device_id` is null), then live `telemetry`, `event`, `status`, `command`, `finder_live`, `finder_spot`, `finder_spot_deleted`, `alert`, `sms` (admins only), and `settings`.
+3. The Server sends `snapshot {device: DeviceSnapshot}` for the subscribed device (or for every device when `device_id` is null), then live `telemetry`, `event`, `status`, `command`, `finder_live`, `finder_spot`, `finder_spot_deleted`, `alert`, `sms` (admins only), and `settings`. When a phone is paired, and on a phone's first connection, the Server sends a `snapshot` for it (instead of `status`) to Dashboards subscribed to all devices or to that id, so a new phone appears without a reload.
 4. `rates` for an Agent: `fast_s = fast_active_s` if at least one authenticated Dashboard is subscribed to that device (or to all), else `fast_idle_s`. `mirror = true` if at least one of those has `finder:true`.
 5. The client sends `{"t":"ping"}` every 25 s and the Server answers `pong`. The client reconnects with backoff and re-sends `auth` + `subscribe`.
 
@@ -144,7 +162,14 @@ score  = round1(100 * (w_sinr*n_sinr + w_rsrp*n_rsrp + w_rsrq*n_rsrq))   // miss
 
 - The Server tracks `last_seen` (any Agent message) per device and persists it.
 - "Phone offline" fires when `now − last_seen > alerts.offline_after_s` (180 s). The check runs every 15 s, and once at Server start (after a free-tier spin-down the Server reloads `last_seen` and the open offline alert from the database).
-- "Back online" fires on the first message after an offline alert. It includes the reason if known: the Agent's `boot` / `agent_start` / `watchdog_action` events from the backlog, or the time spent offline.
+- "Back online" is prepared on the first message after an offline alert and sent once the backlog has drained, so it can name the reason:
+  - **Drained** means a heartbeat since the reconnect reported `outbox: 0`, or reported N and N buffered messages have been stored since. If no heartbeat has reported yet, 10 s with no buffered message arriving or being stored. The alert waits at most 2 min; after that it says "Reason not yet known … (about N messages left)".
+  - **Reasons** are events received after the reconnect whose phone `ts` is at or after `last_seen` (`watchdog_action`, `power_lost`, `reboot_blocked` and `revert` may be up to 60 s earlier), newest 20, shown oldest first.
+  - The duration is reconnect time minus `last_seen`. `data`: `{offline_s, reasons, backlog_drained}`.
+  - A pending "back online" goes out before a new offline alert for the same phone, and on Server shutdown (capped at 5 s). If the phone returns while the offline alert is still being sent, "back online" is still sent once that one is delivered.
+- **Late events:** an alert-worthy event (`EVENT_ALERT`) whose phone `ts` is more than 30 min old when it reaches the Server (`sms_received` excepted) does not alert on its own and is not dropped. Once the backlog has drained (or after at most 2 min) the Server sends one alert per alert kind, titled "<title> (reported late)", with the highest severity, the count and time span and the latest event's message; `data: {late: true, count, event_ids, event_kinds, first_ts, last_ts}`. Events already named in a delivered "back online" alert are left out. This also covers a backlog that arrives while the phone stayed connected.
+- A `moved` alert carries the location in its text (latitude, longitude, OpenStreetMap link) and `data: {lat, lon, map_url}`.
+- An event or telemetry row that was stored but whose commit response was lost is not acked (3.2); when it comes again as a duplicate the Server still raises its alert (once, checked against `alerts_sent`) and rolls it up.
 - Alerts from events: see `EVENT_ALERT` in `events.ts`. Server-evaluated alerts: offline, back online, low battery, signal drop vs baseline, cell changed, tethering down, data quota.
 - The same alert kind for the same device is not repeated within `alerts.cooldown_min`. "Back online" and quota steps are not subject to the cooldown.
 
@@ -154,6 +179,8 @@ score  = round1(100 * (w_sinr*n_sinr + w_rsrp*n_rsrp + w_rsrq*n_rsrq))   // miss
 |------|---------|
 | 1000 | normal |
 | 1001 | Server going away (shutdown or redeploy): reconnect with backoff |
-| 4001 | unauthorized (bad or revoked token / session) |
+| 4001 | unauthorized (bad or revoked token / session, or a dashboard session without TOTP: `auth_failed {message: "totp_enrollment_required"}`, which means "enroll", not "sign out") |
 | 4002 | replaced by a newer connection of the same device |
+| 4004 | dashboard only: the user's role changed, or they turned TOTP off; the session is still valid. Reconnect, re-send `auth`, and refetch `GET /api/auth/me` |
+| 1013 | dashboard only: try again later (session lookup failed or timed out, or no `auth` arrived within 10 s); keep the token and reconnect with backoff |
 | 4003 | protocol error (bad message) |

@@ -72,6 +72,12 @@ export interface CommandSpec {
   revertFor: (args: Record<string, unknown>) => RevertConfirm | null;
   /** Counts toward the reboot limit (plan 6.4 rule 3). */
   is_reboot?: boolean;
+  /**
+   * Argument keys holding secrets (for example the hotspot password). The Server never returns
+   * them over REST or WebSocket (to any role) and blanks them in storage once the command has
+   * reached the Agent.
+   */
+  secret_args?: readonly string[];
 }
 
 export const REVERT_SETTLE_S = 10;
@@ -101,7 +107,7 @@ export const COMMANDS: Record<CommandName, CommandSpec> = {
   },
   hotspot: {
     name: 'hotspot', label: 'Wi-Fi hotspot', group: 'radio', confirm: false, reauth: false, admin_only: false,
-    revertFor: never,
+    revertFor: never, secret_args: ['password'],
   },
   wifi: {
     name: 'wifi', label: 'Wi-Fi', group: 'radio', confirm: false, reauth: false, admin_only: false,
@@ -210,6 +216,8 @@ export const COMMAND_NAMES = Object.keys(COMMANDS) as CommandName[];
  *        \-> expired (not delivered within settings.commands.expiry_s)
  *        sent -> rejected (Agent refused: expired on arrival, unsupported, blocked, reboot limit)
  * done (with revert armed) -> revert_armed -> kept | reverted
+ * sent | acked | revert_armed -> expired (soft: no ack, no result, or no revert report in time;
+ *        late reports still apply, see commandMayMove)
  */
 export type CommandStatus =
   | 'queued'
@@ -243,4 +251,75 @@ export interface CommandRecord {
   duration_ms?: number | null;
   revert_confirm?: RevertConfirm | null;
   revert_deadline?: string | null; // ISO, while status = revert_armed
+}
+
+/**
+ * Which statuses may move to `next` (docs/protocol.md 3.5: a report never moves a command
+ * backwards). `delivered`: the command had reached the Agent (delivered_at set), so a soft
+ * 'expired' can still take its late reports. Used by the Server for its guarded UPDATEs and by
+ * the Dashboard to drop stale copies, so both apply the same lifecycle.
+ */
+export function commandStatusAllowedFrom(next: CommandStatus, delivered: boolean): CommandStatus[] {
+  const soft: CommandStatus[] = delivered ? ['expired'] : [];
+  switch (next) {
+    case 'sent':
+      return ['queued'];
+    case 'expired':
+      return ['queued', 'sent', 'acked', 'revert_armed'];
+    case 'acked':
+    case 'rejected':
+      return ['queued', 'sent', ...soft];
+    case 'done':
+    case 'failed':
+    case 'revert_armed':
+      return ['queued', 'sent', 'acked', ...soft];
+    case 'kept':
+    case 'reverted':
+      return ['queued', 'sent', 'acked', 'done', 'failed', 'revert_armed', ...soft];
+    default:
+      return [];
+  }
+}
+
+const LATE_ORDER: Partial<Record<CommandStatus, number>> = {
+  sent: 1,
+  acked: 2,
+  rejected: 2,
+  done: 3,
+  failed: 3,
+  revert_armed: 3,
+  kept: 4,
+  reverted: 4,
+};
+
+/** How far a command had got before it was marked expired (a soft expiry keeps late reports). */
+function phaseBeforeExpiry(rec: Pick<CommandRecord, 'acked_at' | 'revert_deadline'>): number {
+  if (rec.revert_deadline != null) return 3;
+  if (rec.acked_at != null) return 2;
+  return 1;
+}
+
+/**
+ * Whether a command whose stored record is `cur` may move to status `next`: the transition is in
+ * commandStatusAllowedFrom and, from a soft 'expired', the late report is ahead of what the
+ * command had reached before it expired.
+ */
+export function commandMayMove(
+  cur: Pick<CommandRecord, 'status' | 'delivered_at' | 'acked_at' | 'revert_deadline'>,
+  next: CommandStatus,
+): boolean {
+  if (!commandStatusAllowedFrom(next, cur.delivered_at != null).includes(cur.status)) return false;
+  if (cur.status === 'expired' && (LATE_ORDER[next] ?? 0) <= phaseBeforeExpiry(cur)) return false;
+  return true;
+}
+
+/**
+ * SMS recipient as the Agent checks it (ArgRules.phoneNumber): separators removed, then an optional
+ * `+` and 2..20 digits. Returns the normalized number, or null when it is not one. Separators are
+ * Java's `\s` (ASCII whitespace only, no NBSP) plus `( ) . -`, so a number the Dashboard and the
+ * Server accept is never rejected by the Agent as invalid_args.
+ */
+export function normalizePhoneNumber(value: string): string | null {
+  const v = value.replace(/[ \t\n\v\f\r().-]/g, '');
+  return /^\+?[0-9]{2,20}$/.test(v) ? v : null;
 }

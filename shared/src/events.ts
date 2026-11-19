@@ -34,7 +34,12 @@ export type EventKind =
   | 'reboot_blocked' // reboot limit reached; data: { source }
   | 'settings_applied' // Agent applied a new settings version; data: { version }
   | 'finder' // spot test / speed test finished; data: { spot_id }
-  | 'error'; // unexpected Agent error; data: { where, message }
+  // Server-generated audit record of PUT /api/settings (never sent by the Agent);
+  // data: { user, version, changed: string[] (dotted paths), profile_override_changed: boolean }
+  | 'settings_changed'
+  // unexpected Agent error; data: { where, message, ... }. where 'charge_control': a path accepted
+  // writes but did not stop charging; data.next_path is the path tried next (null if none).
+  | 'error';
 
 export type Severity = 'info' | 'warning' | 'critical';
 

@@ -3,7 +3,7 @@ import { readFileSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import {
-  COMMANDS, DEFAULT_SETTINGS, mergeSettings, rankSpots, signalScore, gradeRsrp, gradeSinr, gradeRsrq,
+  COMMANDS, DEFAULT_SETTINGS, commandMayMove, normalizePhoneNumber, mergeSettings, rankSpots, signalScore, gradeRsrp, gradeSinr, gradeRsrq,
   type FinderSpot,
 } from '../src/index.js';
 
@@ -82,5 +82,45 @@ describe('ranking (plan 7.3)', () => {
 describe('fixtures', () => {
   it('every message has a type', () => {
     for (const f of ['agent-to-server.json', 'server-to-agent.json']) for (const m of fx(f)) expect(typeof m.t).toBe('string');
+  });
+});
+
+describe('command lifecycle (protocol 3.5)', () => {
+  const d = '2026-11-19T10:00:00.000Z';
+  it('soft-expires sent, acked and revert_armed, never a final status', () => {
+    for (const st of ['queued', 'sent', 'acked', 'revert_armed'] as const) expect(commandMayMove({ status: st, delivered_at: d }, 'expired')).toBe(true);
+    for (const st of ['done', 'failed', 'rejected', 'kept', 'reverted'] as const) expect(commandMayMove({ status: st, delivered_at: d }, 'expired')).toBe(false);
+  });
+  it('takes late reports after a soft expiry only when they are ahead of where it had got', () => {
+    expect(commandMayMove({ status: 'expired', delivered_at: d }, 'acked')).toBe(true);
+    expect(commandMayMove({ status: 'expired', delivered_at: d, acked_at: d }, 'acked')).toBe(false);
+    expect(commandMayMove({ status: 'expired', delivered_at: d, acked_at: d }, 'done')).toBe(true);
+    expect(commandMayMove({ status: 'expired', delivered_at: d, acked_at: d, revert_deadline: d }, 'revert_armed')).toBe(false);
+    expect(commandMayMove({ status: 'expired', delivered_at: d, acked_at: d, revert_deadline: d }, 'kept')).toBe(true);
+    // Never delivered: the expiry is final.
+    expect(commandMayMove({ status: 'expired', delivered_at: null }, 'acked')).toBe(false);
+  });
+  it('never moves backwards', () => {
+    expect(commandMayMove({ status: 'done', delivered_at: d }, 'acked')).toBe(false);
+    expect(commandMayMove({ status: 'kept', delivered_at: d }, 'revert_armed')).toBe(false);
+    expect(commandMayMove({ status: 'acked', delivered_at: d }, 'sent')).toBe(false);
+  });
+});
+
+describe('normalizePhoneNumber (Kotlin ArgRules.phoneNumber)', () => {
+  it('removes the separators the Agent removes', () => {
+    expect(normalizePhoneNumber('+91 98765-43210')).toBe('+919876543210');
+    expect(normalizePhoneNumber('(0471) 255.1234')).toBe('04712551234');
+    expect(normalizePhoneNumber('121')).toBe('121');
+  });
+  it('rejects what the Agent rejects', () => {
+    // Java \s is ASCII whitespace only: a non-breaking space (pasted contact) stays and fails there.
+    expect(normalizePhoneNumber('+91\u00a09876543210')).toBeNull();
+    expect(normalizePhoneNumber('1')).toBeNull();
+    expect(normalizePhoneNumber('1'.repeat(21))).toBeNull();
+    expect(normalizePhoneNumber('++91')).toBeNull();
+    expect(normalizePhoneNumber('91+')).toBeNull();
+    expect(normalizePhoneNumber('abc')).toBeNull();
+    expect(normalizePhoneNumber('')).toBeNull();
   });
 });

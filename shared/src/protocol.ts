@@ -92,7 +92,7 @@ export interface HeartbeatMsg {
   ts: string;
   uptime_s: number;
   agent_uptime_s: number;
-  outbox: number; // messages waiting in the local buffer
+  outbox: number; // buffered rows not yet acked (sent or not); the Server uses it to tell when a backlog has drained
   settings_version: number; // last applied settings version (0 = defaults)
 }
 
