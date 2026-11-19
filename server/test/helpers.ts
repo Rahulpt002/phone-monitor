@@ -56,7 +56,7 @@ export async function makeServer(
   const clock = opts.clock ?? new FakeClock(T0);
   const server = await buildServer(testConfig(opts.config), {
     clock,
-    logger: false,
+    logger: opts.logger ?? false,
     fetch: opts.fetch,
     pushSender: opts.pushSender,
   });
@@ -188,6 +188,52 @@ export async function adminWithTotp(server: HsmServer, clock: FakeClock): Promis
   const en = await api(server, 'POST', '/api/auth/totp/enable', { token, body: { code: totpCode(secret, clock.now()) } });
   if (en.status !== 200) throw new Error(`enable failed: ${JSON.stringify(en.body)}`);
   return { token, secret };
+}
+
+type NewUser = { username: string; password: string; role: 'admin' | 'viewer' };
+
+/** POST /api/users as an admin, re-authenticating with that admin's password. */
+export async function createUser(server: HsmServer, adminToken: string, user: NewUser, reauthPassword = ADMIN.password) {
+  return api(server, 'POST', '/api/users', { token: adminToken, body: { ...user, reauth_password: reauthPassword } });
+}
+
+/**
+ * Two-step sign-in for a user with TOTP. Advances the clock by one TOTP step first, so the code
+ * is never a replay of the previous one.
+ */
+export async function loginWithTotp(
+  server: HsmServer,
+  clock: FakeClock,
+  creds: { username: string; password: string },
+  secret: string,
+): Promise<string> {
+  clock.advance(30_000);
+  const step1 = await api(server, 'POST', '/api/auth/login', { body: creds });
+  if (step1.status !== 200 || !step1.body.totp_required) throw new Error(`login failed: ${JSON.stringify(step1.body)}`);
+  const step2 = await api(server, 'POST', '/api/auth/totp', {
+    body: { pending_token: step1.body.pending_token, code: totpCode(secret, clock.now()) },
+  });
+  if (step2.status !== 200) throw new Error(`TOTP step failed: ${JSON.stringify(step2.body)}`);
+  return step2.body.token as string;
+}
+
+/** Creates a user (as `adminToken`), signs them in and enrolls TOTP: a session that can read. */
+export async function userWithTotp(
+  server: HsmServer,
+  clock: FakeClock,
+  adminToken: string,
+  user: NewUser,
+): Promise<{ id: number; token: string; secret: string }> {
+  const created = await createUser(server, adminToken, user);
+  if (created.status !== 201) throw new Error(`create user failed: ${JSON.stringify(created.body)}`);
+  const login = await api(server, 'POST', '/api/auth/login', { body: { username: user.username, password: user.password } });
+  if (login.status !== 200) throw new Error(`login failed: ${JSON.stringify(login.body)}`);
+  const token = login.body.token as string;
+  const setup = await api(server, 'POST', '/api/auth/totp/setup', { token });
+  const secret = setup.body.secret as string;
+  const en = await api(server, 'POST', '/api/auth/totp/enable', { token, body: { code: totpCode(secret, clock.now()) } });
+  if (en.status !== 200) throw new Error(`enable failed: ${JSON.stringify(en.body)}`);
+  return { id: created.body.id as number, token, secret };
 }
 
 export const msgsOfType = (s: FakeSocket, t: string) => s.sent.filter((m) => m.t === t);

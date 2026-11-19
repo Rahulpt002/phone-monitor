@@ -10,7 +10,7 @@ import {
 import type { AppContext } from '../context.js';
 import { badRequest } from '../errors.js';
 import { iso, isNum, isPlainObject, parseTs, type Plain } from '../util.js';
-import type { DeviceRuntime } from './devices.js';
+import { FUTURE_TS_TOLERANCE_MS, type DeviceRuntime } from './devices.js';
 import type { IngestBatch } from './ingest.js';
 
 export const RAW_RETENTION_MS = 7 * 86_400_000;
@@ -94,8 +94,14 @@ export class TelemetryService {
       args: [dev.id, ts, tier, JSON.stringify(data), this.ctx.clock.now()],
     });
     batch.after((results) => {
-      if ((results[idx]?.rowsAffected ?? 0) === 0) return; // duplicate re-send
+      // Always: recomputing a minute is idempotent, and an ignored insert may be the resend of a
+      // group whose commit succeeded but whose response was lost, so no after-commit ran (F46).
       this.markDirty(dev.id, ts);
+      if ((results[idx]?.rowsAffected ?? 0) === 0) {
+        // Duplicate: merging is idempotent (only newer readings win); it is not relayed again.
+        this.ctx.devices.mergeTelemetry(dev, item as unknown as TelemetryMsg, ts);
+        return;
+      }
       this.onStored(dev, item as unknown as TelemetryMsg, ts, data);
     });
     return true;
@@ -103,7 +109,9 @@ export class TelemetryService {
 
   private onStored(dev: DeviceRuntime, msg: TelemetryMsg, ts: number, groups: Plain): void {
     const changed = this.ctx.devices.mergeTelemetry(dev, msg, ts);
-    const live = this.ctx.clock.now() - ts <= PROTOCOL.live_window_s * 1000;
+    const age = this.ctx.clock.now() - ts;
+    // A reading dated well in the future (phone clock ahead, not yet corrected) is backlog, not live.
+    const live = age <= PROTOCOL.live_window_s * 1000 && age >= -FUTURE_TS_TOLERANCE_MS;
     if (!live) return;
     const relay = { ...groups, t: 'telemetry', device_id: dev.id, ts: iso(ts), tier: msg.tier } as DashTelemetryMsg;
     this.ctx.hub.broadcastDevice(dev.id, relay);

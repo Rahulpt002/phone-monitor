@@ -67,7 +67,9 @@ describe('end to end: pairing, live sockets, fixtures and a command', () => {
     expect(codeRes.status).toBe(201);
     const { code, deep_link, adb_command } = codeRes.body;
     expect(deep_link).toBe(`hsm://pair?server=${encodeURIComponent(base)}&code=${code}`);
-    expect(adb_command).toBe(`adb shell "am start -a android.intent.action.VIEW -d '${deep_link}' --ez auto true"`);
+    expect(adb_command).toBe(
+      `adb shell "am start -n com.hotspotmonitor.agent/.ui.AdbPair -a android.intent.action.VIEW -d '${deep_link}' --ez auto true"`,
+    );
 
     const staticMsg = fixture<Msg[]>('agent-to-server.json').find((m) => m.tier === 'static')!;
     const { device_id: _ignored, ...info } = staticMsg.device as DeviceInfo;

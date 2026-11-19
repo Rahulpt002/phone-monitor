@@ -99,14 +99,22 @@ export class PushService {
     return this.publicKey;
   }
 
-  async subscribe(userId: number, body: unknown, userAgent: string | null): Promise<void> {
+  /**
+   * Stores a subscription for the session that created it (`sessionHash`, the SHA-256 of the
+   * session token: AuthInfo.sessionHash). AuthService deletes it when that session ends (logout,
+   * revocation, expiry) and deletes all of a user's subscriptions on reset_totp or an admin
+   * password reset (F04). A subscription stored without a session is treated as belonging to every
+   * session of that user and is deleted when any of them signs out.
+   */
+  async subscribe(userId: number, body: unknown, userAgent: string | null, sessionHash: string | null = null): Promise<void> {
     const parsed = PushSubscriptionSchema.safeParse(body);
     if (!parsed.success) throw badRequest('Invalid push subscription');
     const s = parsed.data;
     await this.ctx.db.run(
-      `INSERT INTO push_subscriptions (endpoint, user_id, p256dh, auth, created_at, user_agent) VALUES (?, ?, ?, ?, ?, ?)
-       ON CONFLICT (endpoint) DO UPDATE SET user_id = excluded.user_id, p256dh = excluded.p256dh, auth = excluded.auth`,
-      [s.endpoint, userId, s.keys.p256dh, s.keys.auth, iso(this.ctx.clock.now()), userAgent?.slice(0, 300) ?? null],
+      `INSERT INTO push_subscriptions (endpoint, user_id, p256dh, auth, created_at, user_agent, session_hash) VALUES (?, ?, ?, ?, ?, ?, ?)
+       ON CONFLICT (endpoint) DO UPDATE SET user_id = excluded.user_id, p256dh = excluded.p256dh, auth = excluded.auth,
+         session_hash = excluded.session_hash`,
+      [s.endpoint, userId, s.keys.p256dh, s.keys.auth, iso(this.ctx.clock.now()), userAgent?.slice(0, 300) ?? null, sessionHash],
     );
   }
 
@@ -115,14 +123,19 @@ export class PushService {
   }
 
   /**
-   * Sends to every stored subscription. Viewers get `viewerPayload` (null = skip them).
-   * Subscriptions the push service reports as gone (404/410) are deleted.
+   * Sends to every stored subscription whose user has TOTP enrolled (plan 10: nothing reaches a
+   * user who has not) and whose session is still valid. Viewers get `viewerPayload`
+   * (null = skip them). Subscriptions the push service reports as gone (404/410) are deleted.
    * Returns how many deliveries succeeded.
    */
   async sendAll(payload: PushPayload, viewerPayload: PushPayload | null): Promise<number> {
     if (!this.configured) return 0;
     const subs = await this.ctx.db.all<{ endpoint: string; p256dh: string; auth: string; role: string | null }>(
-      `SELECT s.endpoint, s.p256dh, s.auth, u.role FROM push_subscriptions s JOIN users u ON u.id = s.user_id`,
+      `SELECT s.endpoint, s.p256dh, s.auth, u.role FROM push_subscriptions s JOIN users u ON u.id = s.user_id
+       WHERE u.totp_secret IS NOT NULL
+         AND (s.session_hash IS NULL OR EXISTS (
+           SELECT 1 FROM sessions x WHERE x.token_hash = s.session_hash AND x.kind = 'session' AND x.expires_at > ?))`,
+      [this.ctx.clock.now()],
     );
     if (subs.length === 0) return 0;
     const options: webpush.RequestOptions = {

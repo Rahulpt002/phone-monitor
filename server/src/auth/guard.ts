@@ -13,35 +13,38 @@ declare module 'fastify' {
 export type Guard = (req: FastifyRequest) => Promise<void>;
 
 export interface Guards {
-  /** Any signed-in user. */
+  /**
+   * Any valid session, second factor enrolled or not. Only for the enrollment allow-list
+   * (shared/src/api.ts MeResponse): GET /auth/me, POST /auth/logout, /auth/password,
+   * /auth/totp/setup and /auth/totp/enable.
+   */
+  session: Guard;
+  /** Any signed-in user with TOTP enrolled (plan 10: password plus TOTP for every role). */
   user: Guard;
-  /** Admins; reads are allowed without TOTP. */
+  /** Admins (TOTP enrolled). */
   admin: Guard;
-  /** Admins with TOTP enrolled: every write (commands, settings, pairing, users). */
+  /** Admin writes (commands, settings, pairing, users). Same rule as `admin` since TOTP is required for everyone. */
   adminWrite: Guard;
 }
 
+export const totpEnrollmentRequired = () =>
+  new ApiHttpError(403, 'totp_enrollment_required', 'Set up an authenticator app (TOTP) to continue');
+
 export function makeGuards(ctx: AppContext): Guards {
-  const user: Guard = async (req) => {
+  const session: Guard = async (req) => {
     const info = await ctx.auth.authenticate(parseBearer(req.headers.authorization));
     if (!info) throw unauthorized();
     req.auth = info;
+  };
+  const user: Guard = async (req) => {
+    await session(req);
+    if (req.auth && ctx.auth.needsTotpEnrollment(req.auth.user)) throw totpEnrollmentRequired();
   };
   const admin: Guard = async (req) => {
     await user(req);
     if (req.auth?.user.role !== 'admin') throw forbidden('Only admins can do this');
   };
-  const adminWrite: Guard = async (req) => {
-    await admin(req);
-    if (req.auth && ctx.auth.needsTotpEnrollment(req.auth.user)) {
-      throw new ApiHttpError(
-        403,
-        'totp_enrollment_required',
-        'Set up an authenticator app (TOTP) before making changes',
-      );
-    }
-  };
-  return { user, admin, adminWrite };
+  return { session, user, admin, adminWrite: admin };
 }
 
 export function authOf(req: FastifyRequest): AuthInfo {

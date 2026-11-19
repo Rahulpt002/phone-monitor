@@ -77,6 +77,8 @@ const EnvSchema = z.object({
   PUBLIC_URL: httpUrl('PUBLIC_URL'),
   /** Set by Render on every web service (https://<name>.onrender.com); fallback for PUBLIC_URL. */
   RENDER_EXTERNAL_URL: httpUrl('RENDER_EXTERNAL_URL'),
+  /** Set to "true" by Render on every service; selects the TRUST_PROXY default (one proxy hop). */
+  RENDER: opt,
   DATABASE_URL: opt,
   DATABASE_AUTH_TOKEN: opt,
   ADMIN_USERNAME: opt,
@@ -105,9 +107,12 @@ const EnvSchema = z.object({
  * - false / no / off: ignore X-Forwarded-* headers.
  * - anything else: a comma list of trusted proxy addresses, CIDRs or the names loopback,
  *   linklocal, uniquelocal (Docker + Caddy).
+ * - unset: 1 on Render (RENDER or RENDER_EXTERNAL_URL is set: exactly one proxy in front), else
+ *   false. Never true by default: with true a client picks its own IP by sending X-Forwarded-For
+ *   and slips past the per-IP login and pairing limits (F20).
  */
-function parseTrustProxy(v: string | undefined): boolean | number | string {
-  if (v === undefined) return true;
+function parseTrustProxy(v: string | undefined, onRender: boolean): boolean | number | string {
+  if (v === undefined) return onRender ? 1 : false;
   const s = v.toLowerCase();
   if (/^\d+$/.test(s)) {
     const n = Number(s);
@@ -180,6 +185,18 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     corsOrigins,
     webDist: e.WEB_DIST ? resolve(e.WEB_DIST) : resolve(REPO_DIR, 'web', 'dist'),
     logLevel: e.LOG_LEVEL ?? 'info',
-    trustProxy: parseTrustProxy(e.TRUST_PROXY),
+    trustProxy: parseTrustProxy(e.TRUST_PROXY, e.RENDER !== undefined || e.RENDER_EXTERNAL_URL !== undefined),
   };
+}
+
+/** Configuration that works but is unsafe; logged as warnings at startup (security.ts). */
+export function configWarnings(config: Config): string[] {
+  const out: string[] = [];
+  if (config.trustProxy === true) {
+    out.push(
+      'TRUST_PROXY=true trusts every X-Forwarded-For entry: a client can choose its own IP and bypass the per-IP login and pairing limits. ' +
+        'Set a hop count (1 behind one proxy such as Render), a list of proxy addresses, or false (docs/deploy.md 6.1).',
+    );
+  }
+  return out;
 }

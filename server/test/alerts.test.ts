@@ -105,7 +105,7 @@ describe('alerts', () => {
     const alerts = await server.ctx.alerts.list(dev.id, 10, null, false);
     expect(alerts[0]).toMatchObject({ kind: 'back_online', severity: 'info' });
     expect(alerts[0]?.message).toContain('phone rebooted (power_on)');
-    // Last heard at +90 s, back at +945 s: 14 min offline.
+    // Last heard at +90 s, heard again at +935 s: 14 min offline (the backlog wait does not count).
     expect(alerts[0]?.message).toMatch(/^Back online after 14 min\./);
   });
 
@@ -211,7 +211,8 @@ describe('alerts', () => {
 
   it('raises event alerts and skips disabled kinds', async () => {
     const { dev, tg } = await setup();
-    // A backlog event more than 30 min old is stored but does not alert.
+    // A backlog event more than 30 min old is stored but does not alert on its own (it goes into a
+    // "reported late" alert once the backlog has drained; see alerts-backlog.test.ts).
     clock.advance(3_600_000);
     await ingest(server, dev, fixture<Record<string, unknown>[]>('agent-to-server.json').find((m) => m.t === 'event'));
     await new Promise((r) => setTimeout(r, 10));

@@ -4,6 +4,7 @@ import type { DeviceRuntime } from '../src/services/devices.js';
 import { normalizeStoredSettings, validateSettings } from '../src/services/settings.js';
 import type { HsmServer } from '../src/server.js';
 import {
+  ADMIN,
   adminWithTotp,
   api,
   connectFakeAgent,
@@ -171,12 +172,12 @@ describe('PUT /api/settings', () => {
       thermal: { cpu: ['cpu-0'], modem: ['modem'] },
       commands: { hotspot: 'cmd wifi start-softap {ssid} wpa2 {password}' },
     };
-    const first = await api(server, 'PUT', '/api/settings', { token, body: { settings: { profile_override: full } } });
+    const first = await api(server, 'PUT', '/api/settings', { token, body: { settings: { profile_override: full }, password: ADMIN.password } });
     expect(first.body).toMatchObject({ version: 2, settings: { profile_override: full } });
 
     // Remove `commands` and the nested `thermal.modem` in a single request.
     const smaller = { charge_control: full.charge_control, thermal: { cpu: ['cpu-0'] } };
-    const second = await api(server, 'PUT', '/api/settings', { token, body: { settings: { profile_override: smaller } } });
+    const second = await api(server, 'PUT', '/api/settings', { token, body: { settings: { profile_override: smaller }, password: ADMIN.password } });
     expect(second.status).toBe(200);
     expect(second.body.version).toBe(3);
     expect(second.body.settings.profile_override).toEqual(smaller);
@@ -199,10 +200,10 @@ describe('PUT /api/settings', () => {
   it('stores and clears a device profile override', async () => {
     const r = await api(server, 'PUT', '/api/settings', {
       token,
-      body: { settings: { profile_override: { charge_control: [{ path: '/sys/x', on: '1', off: '0' }] } } },
+      body: { settings: { profile_override: { charge_control: [{ path: '/sys/x', on: '1', off: '0' }] } }, password: ADMIN.password },
     });
     expect(r.body.settings.profile_override).toEqual({ charge_control: [{ path: '/sys/x', on: '1', off: '0' }] });
-    const c = await api(server, 'PUT', '/api/settings', { token, body: { settings: { profile_override: null } } });
+    const c = await api(server, 'PUT', '/api/settings', { token, body: { settings: { profile_override: null }, password: ADMIN.password } });
     expect(c.body.settings.profile_override).toBeNull();
     expect(c.body.version).toBe(3);
   });

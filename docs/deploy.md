@@ -57,22 +57,22 @@ The Blueprint pins the region to `singapore` (closest to India). Change `region`
 
 Do not add `NODE_ENV=production` to the build environment: `npm ci` would then skip the dev dependencies the build needs.
 
-The Blueprint also sets `TRUST_PROXY=1` (one proxy hop), so the client IP used for login rate limits cannot be forged with an `X-Forwarded-For` header (section 6.1). If you create the web service by hand instead of from the Blueprint, set the same build and start commands, the health check path `/healthz`, `NODE_VERSION=22` and `TRUST_PROXY=1`.
+The Blueprint also sets `TRUST_PROXY=1` (one proxy hop), so the client IP used for login rate limits cannot be forged with an `X-Forwarded-For` header (section 6.1). If you create the web service by hand instead of from the Blueprint, set the same build and start commands, the health check path `/healthz` and `NODE_VERSION=22`. `TRUST_PROXY` may stay unset there: the Server recognises Render (`RENDER` / `RENDER_EXTERNAL_URL`) and then uses one hop by default.
 
 ### 1.3 First sign-in and TOTP
 
 1. Open `https://<service-name>.onrender.com` and sign in with `ADMIN_USERNAME` / `ADMIN_PASSWORD`.
-2. The Dashboard asks you to set up two-factor sign-in. Scan the QR code with an authenticator app (Aegis, Google Authenticator, 1Password, …) and enter the 6-digit code. Until this is done an admin can look at everything but cannot change anything (`403 totp_enrollment_required`).
+2. The Dashboard asks you to set up two-factor sign-in. Scan the QR code with an authenticator app (Aegis, Google Authenticator, 1Password, …) and enter the 6-digit code. TOTP is required for **every** account, admin or viewer (plan section 10): until it is set up, the session can only enroll, change its password or sign out. Everything else, including reading the phone's data and the live WebSocket, answers `403 totp_enrollment_required`.
 3. From now on, sign-in asks for the password and then the code.
 4. Optional: remove `ADMIN_PASSWORD` from Render's environment. It is only read while the users table is empty.
-5. **Settings > Users** adds more accounts: `admin` (monitor and control) or `viewer` (monitor only; no controls, no root shell, no SMS).
-6. **Settings > Pair phone** shows a QR code and an `adb` command for the Agent (docs/protocol.md section 2). Codes are single use and expire after 15 minutes. The `adb` command is for a phone whose screen does not work; it pairs without a tap:
+5. **Settings > Users** adds more accounts: `admin` (monitor and control) or `viewer` (monitor only; no controls, no root shell, no SMS). Every change there (add, change role, set a password, reset an authenticator, delete) asks for **your own** password again. Each new user enrolls TOTP at their first sign-in. Your own password and authenticator are changed under your account (they need the current password), not in the users list.
+6. **Settings > Pair phone** shows a QR code and an `adb` command for the Agent (docs/protocol.md section 2). Codes are single use and expire after 15 minutes. Scanning the QR code opens the Agent, which asks for a tap on the phone to confirm. The `adb` command is for a phone whose screen does not work; it pairs without a tap:
 
    ```sh
-   adb shell "am start -a android.intent.action.VIEW -d 'hsm://pair?server=https%3A%2F%2F<service-name>.onrender.com&code=<CODE>' --ez auto true"
+   adb shell "am start -n com.hotspotmonitor.agent/.ui.AdbPair -a android.intent.action.VIEW -d 'hsm://pair?server=https%3A%2F%2F<service-name>.onrender.com&code=<CODE>' --ez auto true"
    ```
 
-   Copy it as shown: the double quotes keep the `&` in the link away from the phone's shell. To replace an existing pairing without a tap, add `--ez replace true` before the closing quote.
+   Copy it as shown: the double quotes keep the `&` in the link away from the phone's shell. `.ui.AdbPair` can only be started from adb (or root), which is why only this entry point pairs without a tap. To replace an existing pairing without a tap, add `--ez replace true` before the closing quote.
 
 ### 1.4 Telegram alerts
 
@@ -110,7 +110,7 @@ When the phone comes back after a spin-down:
 
 1. Its reconnect attempt (exponential backoff, at most 60 s apart) wakes the Server. The first attempt may time out while the instance boots; the next one succeeds.
 2. On start the Server rebuilds its state from Turso: devices, last seen times, the open offline alert, queued commands, alert cooldowns, settings. It also catches up any missing 1-minute averages from the last 6 hours.
-3. The phone uploads its backlog (telemetry and events stored while offline, docs/protocol.md 3.2). The **"Back online"** alert waits 10 seconds for that backlog so it can name the reason (reboot, watchdog action, power loss) and the time spent offline.
+3. The phone uploads its backlog (telemetry and events stored while offline, docs/protocol.md 3.2). The **"Back online"** alert waits until that backlog has been stored (the phone's heartbeat reports how many messages it still holds; at most 2 minutes) so it can name the reason (reboot, watchdog action, power loss) and the time spent offline. Alert-worthy events from the backlog that are more than 30 minutes old arrive as one "(reported late)" alert per kind instead of one each (docs/protocol.md section 6).
 4. After any restart (deploy, spin-down, Render maintenance) the Server waits 90 seconds before declaring a phone offline, so a phone that is simply reconnecting does not trigger a false alarm.
 
 ### 2.3 Add an external uptime monitor (strongly recommended)
@@ -148,11 +148,18 @@ That is roughly **10,000 rows a day, about 300,000 a month**, plus about 22,000 
 
 The Server already serves the Dashboard, so this is optional (useful for a CDN or preview deployments).
 
-1. In Vercel: **Add New > Project**, import the repository, keep the root directory at the repository root.
-2. Build command `npm ci && npm run build -w web`, output directory `web/dist`.
-3. Environment variable `VITE_API_BASE=https://<service-name>.onrender.com` (no trailing slash). The Dashboard derives the WebSocket URL from it (`https` becomes `wss`).
-4. Add a rewrite of every path to `/index.html` (single-page app), e.g. a `vercel.json` with `{"rewrites":[{"source":"/((?!assets/).*)","destination":"/index.html"}]}`.
-5. On Render set `CORS_ORIGINS=https://<project>.vercel.app` (comma-separate several origins). Sign-in uses bearer tokens, not cookies, so cross-origin works without anything else.
+Vercel reads `vercel.json` only from the project's **Root Directory**. The repository's [`vercel.json`](../vercel.json) sits at the repository root, so the project's Root Directory must stay the repository root (`./`). It already sets everything else:
+
+- install `npm ci` (all workspaces: the Dashboard imports `@hsm/shared` from the workspace), build `npm run build -w web`, output `web/dist`, framework preset none;
+- every path except `/assets/*` is rewritten to `/index.html` (single-page app; a missing hashed asset answers 404, not HTML);
+- `Cache-Control`: hashed `/assets/*` immutable for a year, everything else (`index.html`, `sw.js`, client routes) `no-cache`, so a deploy reaches clients on their next load;
+- the same security headers as the Server ([`server/src/security.ts`](../server/src/security.ts)), with a Content Security Policy whose `connect-src` is `'self' https: wss:` because the API is on another origin.
+
+Steps:
+
+1. In Vercel: **Add New > Project**, import the repository. Leave **Root Directory** at the repository root and leave the build, output and install settings on their defaults: `vercel.json` overrides them.
+2. **Environment Variables**: `VITE_API_BASE=https://<service-name>.onrender.com` (no trailing slash). It is read at build time; the Dashboard derives the WebSocket URL from it (`https` becomes `wss`). Redeploy after changing it.
+3. Deploy, then on Render set `CORS_ORIGINS=https://<project>.vercel.app` (comma-separate several origins, e.g. preview URLs). Sign-in uses bearer tokens, not cookies, so cross-origin works without anything else.
 
 **Why the Server itself cannot run on Vercel.** Vercel runs code as serverless functions. A WebSocket connection there lives at most as long as the function's maximum duration, while the phone needs one connection open for days. Offline detection also needs an always-on process with timers ("no heartbeat for 3 minutes" must be noticed when nothing is happening), and the Server keeps live state in memory between messages. Render (or a VPS) provides a long-running process; Vercel does not.
 
@@ -244,16 +251,17 @@ All variables are documented with examples in [`deploy/.env.example`](../deploy/
 | `CORS_ORIGINS` | none | Extra browser origins for the API |
 | `WEB_DIST` | `<repo>/web/dist` | Built Dashboard |
 | `LOG_LEVEL` | `info` | Log verbosity |
-| `TRUST_PROXY` | `true` (`1` in `render.yaml`) | Proxy headers: hop count, `true`, `false`, or trusted ranges |
+| `TRUST_PROXY` | `false`; `1` on Render (`RENDER` or `RENDER_EXTERNAL_URL` set) | Proxy headers: hop count, `false`, trusted ranges, or `true` (unsafe) |
 
 `TRUST_PROXY` decides which `X-Forwarded-For`, `X-Forwarded-Proto` and `X-Forwarded-Host` headers the Server believes. The client IP feeds the login and pairing rate limits and the logs.
 
-- **A hop count** (`1` on Render): the Server trusts exactly that many proxies, so the client IP is the entry that many places from the right of `X-Forwarded-For`. With `1` it is the right-most entry, the one Render's proxy appended. A client can put anything in front of it (`X-Forwarded-For: 1.2.3.4` arrives as `1.2.3.4, <real IP>`), but cannot change it. Fastify 5 itself treats a number as "trust nothing", so the Server turns the count into a trust function.
-- **`true`** (default when unset): every proxy is trusted and the client IP is the left-most entry, which the client chose. Fine for local development; do not use it on a public server.
+- **Unset**: `false`, except on Render, where the Server sees `RENDER` / `RENDER_EXTERNAL_URL` and uses `1`. It is never `true` by default.
+- **A hop count** (`1` on Render): the Server trusts exactly that many proxies, so the client IP is the entry that many places from the right of `X-Forwarded-For`. With `1` it is the right-most entry, the one Render's proxy appended. A client can put anything in front of it (`X-Forwarded-For: 1.2.3.4` arrives as `1.2.3.4, <real IP>`), but cannot change it. Use a hop count only when that many proxies really sit in front: on a Server that faces the internet directly, hop 0 is the client itself and the "right-most entry" is whatever it sent. Fastify 5 itself treats a number as "trust nothing", so the Server turns the count into a trust function.
 - **A list** of addresses or ranges (`loopback,linklocal,uniquelocal`, CIDRs): only those peers are proxies. The Docker Compose file uses this, because Caddy talks to the Server over the private Docker network.
-- **`false`** or `0`: headers are ignored (the Server faces the internet directly).
+- **`false`** or `0`: headers are ignored (the Server faces the internet directly, or local development).
+- **`true`**: every proxy is trusted and the client IP is the left-most entry, which the client chose, so per-IP limits can be dodged by sending a new `X-Forwarded-For` each time. The Server logs a warning at startup when it is set. Do not use it on a public server.
 
-To check the value on a deployment, compare the `ip` in the Server's `agent connected` log line with the phone's public IPv4 on the Dashboard (`net.public_ipv4`, when the phone uses IPv4). If every client shows the same address that belongs to the hosting provider, the chain has one more proxy hop: raise the count by one. Per-username lockout (5 failures, 15 minutes) applies regardless of IP.
+To check the value on a deployment, compare the `ip` in the Server's `agent connected` log line with the phone's public IPv4 on the Dashboard (`net.public_ipv4`, when the phone uses IPv4). If every client shows the same address that belongs to the hosting provider, the chain has one more proxy hop: raise the count by one. Per-username lockout (5 failed sign-ins, 15 minutes) applies regardless of IP; concurrent attempts count as they start, so a burst gets at most 5 guesses. A browser that has signed in before sends its known-device token and is not affected by that username lock (only by its own 5 failures), so strangers guessing at `admin` cannot lock you out of a browser you already use; a new browser has to wait out the lock. Password re-entry inside a signed-in session (reboot, root shell, unpair, user management) has its own counter per session, so failed sign-ins by someone else never block it.
 
 ### 6.2 Endpoints
 
@@ -264,9 +272,10 @@ To check the value on a deployment, compare the `ip` in the Server's `agent conn
 
 ### 6.3 Recovery
 
-- **Lost authenticator, another admin exists**: that admin opens **Settings > Users** and resets your TOTP (`PATCH /api/users/:id` with `{"reset_totp": true}`).
-- **Lost authenticator, only admin**: clear it in the database, then sign in and enroll again:
+- **Lost authenticator (or a lost phone that was signed in), another admin exists**: that admin opens **Settings > Users** and resets your TOTP, confirming with their own password (`PATCH /api/users/:id` with `{"reset_totp": true, "reauth_password": "…"}`). This also signs out all your sessions and deletes your push subscriptions, so the lost phone stops receiving alerts. Sign in again and enroll a new authenticator.
+- **Lost authenticator, only admin**: clear it in the database, restart the Server (it caches users in memory), then sign in and enroll again:
   `turso db shell hsm "UPDATE users SET totp_secret = NULL, totp_last_step = NULL WHERE username = 'admin'"`
   (on a VPS: `sqlite3` on the `hsm.db` file in the `hsm-data` volume, with the Server stopped).
-- **Forgotten password**: another admin sets a new one in **Settings > Users**. If nobody can sign in as admin, set `ADMIN_USERNAME` / `ADMIN_PASSWORD`, empty the users table (`DELETE FROM sessions; DELETE FROM push_subscriptions; DELETE FROM users;` through `turso db shell hsm` or `sqlite3`), and restart: with no users the Server creates the admin again. Recreate any viewer accounts afterwards.
+- **Forgotten password**: another admin sets a new one in **Settings > Users** (with their own password; this signs you out everywhere and deletes your push subscriptions). If nobody can sign in as admin, set `ADMIN_USERNAME` / `ADMIN_PASSWORD`, empty the users table (`DELETE FROM sessions; DELETE FROM push_subscriptions; DELETE FROM users;` through `turso db shell hsm` or `sqlite3`), and restart: with no users the Server creates the admin again. Recreate any viewer accounts afterwards.
+- **Signing out** deletes that browser's push subscription on the Server. Signing out elsewhere, changing your password or having your sessions revoked also stops alerts to the signed-out devices; a browser that is still signed in registers its subscription again on its next load.
 - **Phone lost or replaced**: **Settings > Devices > Unpair** revokes its token (the Agent receives close code 4001), then pair the new phone with a fresh code.

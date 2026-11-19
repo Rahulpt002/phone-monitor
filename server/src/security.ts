@@ -1,5 +1,5 @@
 import type { FastifyInstance } from 'fastify';
-import type { Config } from './config.js';
+import { configWarnings, type Config } from './config.js';
 
 function wsOrigin(url: string): string | null {
   try {
@@ -35,8 +35,12 @@ export function spaCsp(config: Config): string {
 
 const API_CSP = "default-src 'none'; frame-ancestors 'none'";
 
-/** Helmet-like headers, set by hand to avoid another dependency (plan section 10). */
+/**
+ * Helmet-like headers, set by hand to avoid another dependency (plan section 10). Also logs unsafe
+ * configuration (configWarnings) once at startup.
+ */
 export function registerSecurityHeaders(app: FastifyInstance, config: Config): void {
+  for (const w of configWarnings(config)) app.log.warn(w);
   const csp = spaCsp(config);
   app.addHook('onSend', async (req, reply, payload) => {
     reply.header('x-content-type-options', 'nosniff');

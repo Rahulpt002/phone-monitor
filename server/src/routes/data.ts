@@ -14,9 +14,12 @@ import { badRequest, parseOrThrow } from '../errors.js';
 import { redactEventForViewer } from '../services/records.js';
 import { qInt, qString, qTime, query } from './helpers.js';
 
+/** PutSettingsRequest (shared/src/api.ts). */
 const SettingsPutSchema = z.object({
   device_id: z.string().max(64).optional(),
   settings: z.record(z.string(), z.unknown()),
+  /** The admin's own password; required when profile_override changes. */
+  password: z.string().max(256).optional(),
 });
 
 export function registerDataRoutes(app: FastifyInstance, ctx: AppContext, g: Guards): void {
@@ -84,8 +87,9 @@ export function registerDataRoutes(app: FastifyInstance, ctx: AppContext, g: Gua
   app.put('/settings', { preHandler: g.adminWrite }, async (req): Promise<SettingsResponse> => {
     const b = parseOrThrow(SettingsPutSchema, req.body, 'settings update');
     const dev = ctx.devices.resolve(b.device_id);
-    const res = await ctx.settings.update(dev, b.settings);
-    ctx.log.info({ device_id: dev.id, version: res.version, by: authOf(req).user.username }, 'settings updated');
+    const a = authOf(req);
+    const res = await ctx.settings.update(dev, b.settings, { user: a.user, auth: a, password: b.password, ip: req.ip });
+    ctx.log.info({ device_id: dev.id, version: res.version, by: a.user.username }, 'settings updated');
     return res;
   });
 

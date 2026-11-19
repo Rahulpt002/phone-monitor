@@ -10,7 +10,7 @@ import {
   type RadioInfo,
 } from '@hsm/shared';
 import type { AppContext } from '../context.js';
-import { escapeHtml } from '../notify/telegram.js';
+import { cutText, escapeHtml } from '../notify/telegram.js';
 import type { PushPayload } from '../notify/push.js';
 import { formatDuration, iso, isNum, parseTs, safeJsonParse } from '../util.js';
 import type { DeviceRuntime, GroupKey } from './devices.js';
@@ -52,8 +52,15 @@ export interface RaiseInput {
   sensitive?: boolean;
 }
 
-/** Wait for backlog after a reconnect so "back online" can name the reason (protocol 6). */
+/**
+ * "Back online" waits for the backlog so it can name the reason (protocol 6). The backlog counts as
+ * drained when a heartbeat since the reconnect reported an empty outbox (or N waiting messages, and
+ * N have been stored since), or, while no heartbeat since the reconnect reported the outbox, when no
+ * buffered message has arrived for this long. See AlertService.backlogDrained.
+ */
 export const BACK_ONLINE_DELAY_MS = 10_000;
+/** Longest wait for the backlog; after it the alert says the reason is not yet known (F24). */
+export const BACK_ONLINE_MAX_WAIT_MS = 120_000;
 /**
  * After a restart (deploy, free-tier spin-down) the Agent needs a moment to reconnect, so a device
  * is not declared offline sooner than this after the process started.
@@ -63,11 +70,67 @@ export const STARTUP_GRACE_MS = 90_000;
 export const USUAL_CELL_LEARN_MS = 6 * 3_600_000;
 /** Readings older than this are not used for condition timers. */
 export const STALE_STATE_MS = 10 * 60_000;
-/** Event alerts for older (backlog) events are skipped; the back-online alert summarizes them. */
+/**
+ * An alert-worthy event this much older than its arrival (backlog) does not alert on its own. Once
+ * the backlog has drained, one "reported late" alert per alert kind summarizes such events, except
+ * those already named as reasons in the "back online" alert (docs/protocol.md 6).
+ */
 export const EVENT_ALERT_MAX_AGE_MS = 30 * 60_000;
 export const ALERT_RETENTION_MS = 365 * 86_400_000;
+/** Plain-text cap of an alert message (Telegram allows 4096 characters after entity parsing). */
+export const MAX_ALERT_MESSAGE = 3500;
+/** Web Push payloads are limited to about 4 KB. */
+const MAX_PUSH_BODY = 1000;
+/** Characters of a carrier SMS quoted in its alert. */
+export const MAX_SMS_IN_ALERT = 1000;
+/** Events per alert kind kept for one "reported late" alert (the rest are only counted). */
+const LATE_KEEP = 50;
 const NO_COOLDOWN: AlertKind[] = ['back_online', 'data_quota', 'server_test'];
-const REASON_KINDS = ['boot', 'agent_start', 'watchdog_action', 'power_lost', 'power_connected', 'revert', 'reboot_blocked'];
+export const REASON_KINDS = ['boot', 'agent_start', 'watchdog_action', 'power_lost', 'power_connected', 'revert', 'reboot_blocked'];
+/** Reasons that can precede the blackout they cause (for example a watchdog reboot). */
+const REASON_LOOKBACK_KINDS = ['watchdog_action', 'power_lost', 'reboot_blocked', 'revert'];
+const REASON_LOOKBACK_MS = 60_000;
+const REASON_LIMIT = 20;
+/** Remembered event ids whose alert this process already handled (duplicate resends, F46). */
+const HANDLED_EVENTS_MAX = 2000;
+
+interface PendingBackOnline {
+  /** When the phone was heard again (start of the backlog wait). */
+  backAt: number;
+  /** Last seen before the outage. */
+  offlineFrom: number;
+  /** The offline alert was delivered (or is on its way), so "back online" is due. */
+  alertSent: boolean;
+}
+
+interface LateEntry {
+  event: AgentEvent;
+  tsMs: number;
+}
+
+interface LateBucket {
+  /** When the first late event of this bucket arrived. */
+  firstAt: number;
+  ids: Set<string>;
+  kinds: Map<AlertKind, { entries: LateEntry[]; more: number; moreSeverity: AlertSeverity | null }>;
+}
+
+const SEVERITY_RANK: Record<AlertSeverity, number> = { info: 0, warning: 1, critical: 2 };
+const maxSeverity = (a: AlertSeverity, b: AlertSeverity): AlertSeverity => (SEVERITY_RANK[b] > SEVERITY_RANK[a] ? b : a);
+
+/** Coordinates of a `moved` event (data.lat / data.lon), when present and plausible. */
+export function locationOf(data: Record<string, unknown> | undefined): { lat: number; lon: number } | null {
+  const lat = data?.lat;
+  const lon = data?.lon;
+  if (!isNum(lat) || !isNum(lon) || Math.abs(lat) > 90 || Math.abs(lon) > 180) return null;
+  return { lat, lon };
+}
+
+export const osmUrl = (lat: number, lon: number): string => {
+  const la = lat.toFixed(5);
+  const lo = lon.toFixed(5);
+  return `https://www.openstreetmap.org/?mlat=${la}&mlon=${lo}#map=17/${la}/${lo}`;
+};
 
 const TITLES: Record<AlertKind, string> = {
   offline: 'Phone offline',
@@ -159,7 +222,11 @@ export function redactAlertForViewer(a: AlertRecord): AlertRecord {
 export class AlertService {
   /** Last delivery per device + kind + severity, for the cooldown. */
   private lastSent = new Map<string, number>();
-  private pendingBackOnline = new Map<string, { due: number; offlineFrom: number; alertSent: boolean }>();
+  private pendingBackOnline = new Map<string, PendingBackOnline>();
+  /** Alert-worthy events that arrived too late to alert on their own, per device. */
+  private late = new Map<string, LateBucket>();
+  /** `device|event id` of events whose alert this process already handled (insertion order). */
+  private handledEvents = new Set<string>();
 
   constructor(private ctx: AppContext) {}
 
@@ -187,17 +254,20 @@ export class AlertService {
     }
     this.lastSent.set(key, now);
 
-    const title = input.title ?? TITLES[input.kind];
+    const title = cutText(input.title ?? TITLES[input.kind], 200);
+    // Cut the plain text, never the HTML built from it (an entity or tag cut in half makes
+    // Telegram reject the whole message).
+    const message = cutText(input.message, MAX_ALERT_MESSAGE);
     const deviceName = dev?.name ?? null;
     const { publicUrl } = this.ctx.config;
     const html =
       `<b>${escapeHtml(title)}</b>${input.severity === 'info' ? '' : ` (${input.severity})`}\n` +
-      `${escapeHtml(input.message)}\n` +
+      `${escapeHtml(message)}\n` +
       `<i>${escapeHtml([deviceName, fmtTime(now)].filter(Boolean).join(' · '))}</i>` +
       (publicUrl ? `\n<a href="${escapeHtml(publicUrl)}">Open dashboard</a>` : '');
     const payload: PushPayload = {
       title: deviceName ? `${title} · ${deviceName}` : title,
-      body: input.message,
+      body: cutText(message, MAX_PUSH_BODY),
       tag: `${input.deviceId ?? 'server'}:${input.kind}`,
       kind: input.kind,
       severity: input.severity,
@@ -219,7 +289,7 @@ export class AlertService {
 
     const r = await this.ctx.db.run(
       'INSERT INTO alerts_sent (device_id, kind, severity, title, message, ts, channels, data) VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
-      [input.deviceId, input.kind, input.severity, title, input.message, now, JSON.stringify(channels), input.data ? JSON.stringify(input.data) : null],
+      [input.deviceId, input.kind, input.severity, title, message, now, JSON.stringify(channels), input.data ? JSON.stringify(input.data) : null],
     );
     const rec: AlertRecord = {
       id: Number(r.lastId),
@@ -227,7 +297,7 @@ export class AlertService {
       kind: input.kind,
       severity: input.severity,
       title,
-      message: input.message,
+      message,
       ts: iso(now),
       channels,
       data: input.data ?? null,
@@ -248,26 +318,147 @@ export class AlertService {
   onEvent(dev: DeviceRuntime, event: AgentEvent, tsMs: number): void {
     const kind = EVENT_ALERT[event.kind];
     if (!kind) return;
-    if (this.ctx.clock.now() - tsMs > EVENT_ALERT_MAX_AGE_MS && event.kind !== 'sms_received') return;
-    const severity: AlertSeverity = event.severity;
+    this.markHandled(dev.id, event.id);
+    if (this.ctx.clock.now() - tsMs > EVENT_ALERT_MAX_AGE_MS && event.kind !== 'sms_received') {
+      this.addLate(dev, kind, event, tsMs);
+      return;
+    }
+    this.fire(this.eventAlert(dev, kind, event));
+  }
+
+  /**
+   * An alert-worthy event that was already stored. Normally its alert was handled when it was first
+   * stored; but when a commit succeeded and only its response was lost, the resend is the first
+   * chance to alert (F46). Alerts record `event_id` (or `event_ids`), which is checked first.
+   */
+  onDuplicateEvent(dev: DeviceRuntime, event: AgentEvent, tsMs: number): void {
+    if (!EVENT_ALERT[event.kind]) return;
+    if (this.handledEvents.has(`${dev.id}|${event.id}`)) return;
+    this.alertExistsFor(dev.id, event.id, tsMs)
+      .then((exists) => {
+        if (exists) this.markHandled(dev.id, event.id);
+        else if (this.ctx.devices.get(dev.id) && !this.handledEvents.has(`${dev.id}|${event.id}`)) this.onEvent(dev, event, tsMs);
+      })
+      .catch((err) => this.ctx.log.error({ err, event_id: event.id }, 'failed to check a resent event'));
+  }
+
+  private markHandled(deviceId: string, eventId: string): void {
+    const key = `${deviceId}|${eventId}`;
+    this.handledEvents.delete(key);
+    this.handledEvents.add(key);
+    if (this.handledEvents.size > HANDLED_EVENTS_MAX) {
+      const oldest = this.handledEvents.values().next();
+      if (!oldest.done) this.handledEvents.delete(oldest.value);
+    }
+  }
+
+  private async alertExistsFor(deviceId: string, eventId: string, tsMs: number): Promise<boolean> {
+    const row = await this.ctx.db.get(
+      `SELECT 1 AS x FROM alerts_sent
+       WHERE device_id = ? AND ts >= ?
+         AND (json_extract(data, '$.event_id') = ?
+              OR EXISTS (SELECT 1 FROM json_each(alerts_sent.data, '$.event_ids') WHERE json_each.value = ?))
+       LIMIT 1`,
+      [deviceId, Math.min(tsMs, this.ctx.clock.now()) - 60_000, eventId, eventId],
+    );
+    return row != null;
+  }
+
+  /** Title, message and data of the alert for one event. */
+  private eventAlert(dev: DeviceRuntime, kind: AlertKind, event: AgentEvent): RaiseInput {
     let message = event.message || TITLES[kind];
     let title: string | undefined;
-    if (event.kind === 'sms_received') {
-      const d = event.data ?? {};
-      if (typeof d.body === 'string') message = `From ${typeof d.from === 'string' ? d.from : 'unknown'}: ${d.body}`;
+    const data: Record<string, unknown> = { event_id: event.id, event_kind: event.kind, event_ts: event.ts };
+    const d = event.data ?? {};
+    if (event.kind === 'sms_received' && typeof d.body === 'string') {
+      message = `From ${typeof d.from === 'string' ? cutText(d.from, 64) : 'unknown'}: ${cutText(d.body, MAX_SMS_IN_ALERT)}`;
+    }
+    if (event.kind === 'moved') {
+      // Plan 6.5: "Alert with location".
+      const loc = locationOf(d);
+      if (loc) {
+        const url = osmUrl(loc.lat, loc.lon);
+        message = `${message} Location: ${loc.lat.toFixed(5)}, ${loc.lon.toFixed(5)} ${url}`;
+        Object.assign(data, { lat: loc.lat, lon: loc.lon, map_url: url });
+      }
     }
     if (event.kind === 'temp_critical') title = 'Phone is critically hot';
     if (event.kind === 'revert') title = 'Change auto-reverted';
     if (event.kind === 'reboot_blocked') title = 'Reboot blocked by the limit';
-    this.fire({
+    return {
       deviceId: dev.id,
       kind,
-      severity,
+      severity: event.severity,
       title,
       message,
-      data: { event_id: event.id, event_kind: event.kind, event_ts: event.ts },
+      data,
       sensitive: event.kind === 'sms_received',
-    });
+    };
+  }
+
+  private addLate(dev: DeviceRuntime, kind: AlertKind, event: AgentEvent, tsMs: number): void {
+    let b = this.late.get(dev.id);
+    if (!b) {
+      b = { firstAt: this.ctx.clock.now(), ids: new Set(), kinds: new Map() };
+      this.late.set(dev.id, b);
+    }
+    if (b.ids.has(event.id)) return;
+    b.ids.add(event.id);
+    let k = b.kinds.get(kind);
+    if (!k) {
+      k = { entries: [], more: 0, moreSeverity: null };
+      b.kinds.set(kind, k);
+    }
+    k.entries.push({ event, tsMs });
+    if (k.entries.length > LATE_KEEP) {
+      // Keep the first and the newest ones; the rest are only counted.
+      const [dropped] = k.entries.splice(1, 1);
+      k.more++;
+      if (dropped) k.moreSeverity = maxSeverity(k.moreSeverity ?? 'info', dropped.event.severity);
+    }
+  }
+
+  /**
+   * One alert per alert kind for the late events of a device (F12/F25), leaving out the events that
+   * a delivered "back online" alert already named.
+   */
+  private async flushLate(dev: DeviceRuntime, named: Set<string>): Promise<void> {
+    const b = this.late.get(dev.id);
+    if (!b) return;
+    this.late.delete(dev.id);
+    for (const [kind, k] of b.kinds) {
+      const entries = k.entries.filter((e) => !named.has(e.event.id)).sort((x, y) => x.tsMs - y.tsMs);
+      const count = entries.length + k.more;
+      const latest = entries[entries.length - 1];
+      if (!latest) continue;
+      const first = entries[0] ?? latest;
+      const severity = entries.reduce<AlertSeverity>((s, e) => maxSeverity(s, e.event.severity), k.moreSeverity ?? 'info');
+      const base = this.eventAlert(dev, kind, latest.event);
+      const message =
+        count === 1
+          ? `${base.message} (at ${fmtTime(latest.tsMs)}; reported late from the phone's backlog)`
+          : `${count} times between ${fmtTime(first.tsMs)} and ${fmtTime(latest.tsMs)}, reported late from the phone's backlog. Latest: ${base.message}`;
+      const { event_id: _id, event_kind: _kind, event_ts: _ts, ...extra } = base.data ?? {};
+      await this.raise({
+        deviceId: dev.id,
+        kind,
+        severity,
+        title: `${base.title ?? TITLES[kind]} (reported late)`,
+        message,
+        data: {
+          ...extra,
+          late: true,
+          count,
+          event_ids: entries.map((e) => e.event.id),
+          event_kinds: [...new Set(entries.map((e) => e.event.kind))],
+          first_ts: iso(first.tsMs),
+          last_ts: iso(latest.tsMs),
+        },
+      }).catch((err) => {
+        this.ctx.log.error({ err, kind }, 'failed to raise a late event alert');
+        return null;
+      });
+    }
   }
 
   /** After live telemetry changed the state. */
@@ -425,16 +616,23 @@ export class AlertService {
       const effective = Math.max(ref, this.ctx.startedAt + STARTUP_GRACE_MS - offlineMs);
       if (now - effective <= offlineMs) continue;
 
+      // A "back online" still waiting for its backlog goes out first, so the alerts stay in order.
+      const pending = this.pendingBackOnline.get(dev.id);
+      if (pending) await this.sendBackOnline(dev, pending, now);
+
       dev.offlineAlertOpen = true;
       dev.offlineSince = ref;
-      dev.alertState.offlineAlertSent = false;
-      this.pendingBackOnline.delete(dev.id);
+      // Counts as sent while it is on its way, so a reconnect during the send still leads to
+      // "back online" (F42); corrected below once the outcome is known.
+      dev.alertState.offlineAlertSent = true;
       if (this.ctx.hub.agents.has(dev.id)) {
         // The socket looks open but nothing arrives: a half-open TCP connection.
         this.ctx.hub.terminateAgent(dev.id);
       }
       dev.connectedSince = null;
-      await this.ctx.devices.persistNow(dev);
+      // A failed write must not cost the alert: the device stays dirty and the periodic flush
+      // retries it (F02).
+      await this.ctx.devices.persistNow(dev).catch((err) => this.ctx.log.error({ err, device_id: dev.id }, 'failed to persist the offline state'));
       this.ctx.devices.broadcastStatus(dev);
       const rec = await this.raise({
         deviceId: dev.id,
@@ -448,7 +646,13 @@ export class AlertService {
         this.ctx.log.error({ err }, 'failed to raise offline alert');
         return null;
       });
-      dev.alertState.offlineAlertSent = rec != null;
+      if (dev.offlineAlertOpen && dev.offlineSince === ref) {
+        dev.alertState.offlineAlertSent = rec != null;
+      } else if (rec == null) {
+        // The phone came back while the alert was being sent, and it was not delivered.
+        const p = this.pendingBackOnline.get(dev.id);
+        if (p && p.offlineFrom === ref) p.alertSent = false;
+      }
       dev.dirty = true;
     }
   }
@@ -462,7 +666,7 @@ export class AlertService {
     dev.offlineSince = null;
     dev.lastBackOnline = now;
     this.pendingBackOnline.set(dev.id, {
-      due: now + BACK_ONLINE_DELAY_MS,
+      backAt: now,
       offlineFrom,
       alertSent: dev.alertState.offlineAlertSent !== false,
     });
@@ -470,14 +674,69 @@ export class AlertService {
     this.ctx.devices.persistNow(dev).catch((err) => this.ctx.log.error({ err }, 'failed to persist back-online state'));
   }
 
+  /**
+   * Whether the Agent has uploaded the backlog it had at `since` (F24): a heartbeat since then
+   * reported an empty outbox, or reported N messages and N have been stored since; or, when no
+   * heartbeat since then reported the outbox, no buffered message has arrived (or is being stored)
+   * for BACK_ONLINE_DELAY_MS.
+   */
+  backlogDrained(dev: DeviceRuntime, since: number, now: number): boolean {
+    if (dev.outboxZeroAt != null && dev.outboxZeroAt >= since) return true;
+    if (dev.outboxAt != null && dev.outboxAt >= since) {
+      return dev.storing === 0 && dev.ackedSinceOutbox >= (dev.outbox ?? 0);
+    }
+    if (dev.storing > 0) return false;
+    return now - Math.max(since, dev.bufferedAt ?? 0) >= BACK_ONLINE_DELAY_MS;
+  }
+
+  /**
+   * Sends the "back online" alerts whose backlog has drained (or waited BACK_ONLINE_MAX_WAIT_MS),
+   * then the "reported late" alerts of devices that were not offline. `force` sends everything now
+   * (shutdown).
+   */
   async processPendingBackOnline(force = false): Promise<void> {
     const now = this.ctx.clock.now();
     for (const [id, p] of [...this.pendingBackOnline]) {
-      if (!force && now < p.due) continue;
-      this.pendingBackOnline.delete(id);
       const dev = this.ctx.devices.get(id);
-      if (!dev || !p.alertSent) continue;
-      const events = await this.ctx.records.eventsBetween(id, p.offlineFrom - 60_000, now, REASON_KINDS, 10);
+      if (!dev) {
+        this.pendingBackOnline.delete(id);
+        continue;
+      }
+      if (!force && now - p.backAt < BACK_ONLINE_MAX_WAIT_MS && !this.backlogDrained(dev, p.backAt, now)) continue;
+      await this.sendBackOnline(dev, p, now);
+    }
+    for (const [id, b] of [...this.late]) {
+      if (this.pendingBackOnline.has(id)) continue;
+      const dev = this.ctx.devices.get(id);
+      if (!dev) {
+        this.late.delete(id);
+        continue;
+      }
+      if (!force && now - b.firstAt < BACK_ONLINE_MAX_WAIT_MS && !this.backlogDrained(dev, b.firstAt, now)) continue;
+      await this.flushLate(dev, new Set());
+    }
+  }
+
+  private async sendBackOnline(dev: DeviceRuntime, p: PendingBackOnline, now: number): Promise<void> {
+    if (this.pendingBackOnline.get(dev.id) === p) this.pendingBackOnline.delete(dev.id);
+    let named = new Set<string>();
+    if (p.alertSent) {
+      let drained = this.backlogDrained(dev, p.backAt, now);
+      const events = await this.ctx.records
+        .backOnlineReasons(dev.id, {
+          receivedFrom: p.backAt,
+          offlineFrom: p.offlineFrom,
+          kinds: REASON_KINDS,
+          lookbackKinds: REASON_LOOKBACK_KINDS,
+          lookbackMs: REASON_LOOKBACK_MS,
+          limit: REASON_LIMIT,
+        })
+        .catch((err) => {
+          // The alert still goes out, without claiming that the phone reported nothing.
+          this.ctx.log.error({ err, device_id: dev.id }, 'failed to read the back-online reasons');
+          drained = false;
+          return [];
+        });
       const reasons: string[] = [];
       for (const e of events) {
         const d = e.data ?? {};
@@ -500,18 +759,30 @@ export class AlertService {
         }
         if (!reasons.includes(r)) reasons.push(r);
       }
-      const dur = formatDuration(now - p.offlineFrom);
+      // The outage lasted until the phone was heard again, not until this alert is sent.
+      const offlineMs = Math.max(0, p.backAt - p.offlineFrom);
+      const dur = formatDuration(offlineMs);
+      const remaining = dev.outboxAt != null && dev.outboxAt >= p.backAt ? Math.max(0, (dev.outbox ?? 0) - dev.ackedSinceOutbox) : 0;
+      const left = remaining > 0 ? ` (about ${remaining} messages left)` : '';
       const message = reasons.length
-        ? `Back online after ${dur}. Reported by the phone: ${reasons.join('; ')}.`
-        : `Back online after ${dur}. The phone reported no reboot or watchdog action (likely a network or server-side gap).`;
-      await this.raise({
-        deviceId: id,
+        ? `Back online after ${dur}. Reported by the phone: ${reasons.join('; ')}.` +
+          (drained ? '' : ` The phone is still uploading its backlog${left}, so there may be more.`)
+        : drained
+          ? `Back online after ${dur}. The phone reported no reboot or watchdog action (likely a network or server-side gap).`
+          : `Back online after ${dur}. Reason not yet known: the phone is still uploading its backlog${left}.`;
+      const rec = await this.raise({
+        deviceId: dev.id,
         kind: 'back_online',
         severity: 'info',
         message,
-        data: { offline_s: Math.round((now - p.offlineFrom) / 1000), reasons },
+        data: { offline_s: Math.round(offlineMs / 1000), reasons, backlog_drained: drained },
+      }).catch((err) => {
+        this.ctx.log.error({ err }, 'failed to raise back-online alert');
+        return null;
       });
+      if (rec) named = new Set(events.map((e) => e.id));
     }
+    await this.flushLate(dev, named);
   }
 
   /** Periodic work (every 15 s): offline check and time-based conditions of online devices. */

@@ -3,12 +3,12 @@ import { hashPassword, verifyPassword } from '../src/auth/password.js';
 import { base32Decode, base32Encode, hotp, totpCode, verifyTotp } from '../src/auth/totp.js';
 import { LOCK_MS } from '../src/auth/lockout.js';
 import type { HsmServer } from '../src/server.js';
-import { ADMIN, adminWithTotp, api, FakeClock, makeServer, T0 } from './helpers.js';
+import { ADMIN, adminWithTotp, api, createUser, FakeClock, makeServer, T0, userWithTotp } from './helpers.js';
 
 describe('scrypt password hashing', () => {
   it('verifies the right password and rejects others', async () => {
     const h = await hashPassword('a long passphrase');
-    expect(h).toMatch(/^scrypt\$16384\$8\$1\$[A-Za-z0-9+/=]+\$[A-Za-z0-9+/=]+$/);
+    expect(h).toMatch(/^scrypt\$32768\$8\$3\$[A-Za-z0-9+/=]+\$[A-Za-z0-9+/=]+$/);
     expect(await verifyPassword('a long passphrase', h)).toBe(true);
     expect(await verifyPassword('a long passphrasE', h)).toBe(false);
     expect(await verifyPassword('x', 'garbage')).toBe(false);
@@ -59,7 +59,7 @@ describe('auth API', () => {
   let clock: FakeClock;
   afterEach(async () => server?.close());
 
-  it('bootstraps the admin and requires TOTP enrollment before writes', async () => {
+  it('bootstraps the admin and requires TOTP enrollment before anything else', async () => {
     ({ server, clock } = await makeServer());
     const login = await api(server, 'POST', '/api/auth/login', { body: ADMIN });
     expect(login.status).toBe(200);
@@ -67,9 +67,11 @@ describe('auth API', () => {
     const token = login.body.token;
     const me = await api(server, 'GET', '/api/auth/me', { token });
     expect(me.body).toMatchObject({ user: { username: 'admin', role: 'admin', totp_enabled: false }, totp_enrollment_required: true });
-    // Reads work.
-    expect((await api(server, 'GET', '/api/devices', { token })).status).toBe(200);
-    // Writes do not.
+    // Neither reads (plan 10: password plus TOTP for every login)...
+    const read = await api(server, 'GET', '/api/devices', { token });
+    expect(read.status).toBe(403);
+    expect(read.body.error).toBe('totp_enrollment_required');
+    // ...nor writes.
     const write = await api(server, 'POST', '/api/pair/codes', { token, body: {} });
     expect(write.status).toBe(403);
     expect(write.body.error).toBe('totp_enrollment_required');
@@ -136,18 +138,15 @@ describe('auth API', () => {
   it('manages users with role rules', async () => {
     ({ server, clock } = await makeServer());
     const { token } = await adminWithTotp(server, clock);
-    const short = await api(server, 'POST', '/api/users', { token, body: { username: 'viewer1', password: 'short', role: 'viewer' } });
+    const reauth_password = ADMIN.password;
+    const short = await createUser(server, token, { username: 'viewer1', password: 'short', role: 'viewer' });
     expect(short.status).toBe(400);
-    const created = await api(server, 'POST', '/api/users', {
-      token,
-      body: { username: 'viewer1', password: 'viewer-password', role: 'viewer' },
-    });
-    expect(created.status).toBe(201);
-    const dup = await api(server, 'POST', '/api/users', { token, body: { username: 'VIEWER1', password: 'viewer-password', role: 'viewer' } });
+    const vuser = await userWithTotp(server, clock, token, { username: 'viewer1', password: 'viewer-password', role: 'viewer' });
+    const dup = await createUser(server, token, { username: 'VIEWER1', password: 'viewer-password', role: 'viewer' });
     expect(dup.status).toBe(409);
 
-    const vlogin = await api(server, 'POST', '/api/auth/login', { body: { username: 'viewer1', password: 'viewer-password' } });
-    const vtoken = vlogin.body.token;
+    const vtoken = vuser.token;
+    expect((await api(server, 'GET', '/api/devices', { token: vtoken })).status).toBe(200);
     expect((await api(server, 'GET', '/api/users', { token: vtoken })).status).toBe(403);
     expect((await api(server, 'GET', '/api/sms', { token: vtoken })).status).toBe(403);
     const cmd = await api(server, 'POST', '/api/commands', { token: vtoken, body: { name: 'refresh' } });
@@ -155,10 +154,10 @@ describe('auth API', () => {
     expect(cmd.body.error).toBe('forbidden');
 
     const me = (await api(server, 'GET', '/api/auth/me', { token })).body.user;
-    expect((await api(server, 'DELETE', `/api/users/${me.id}`, { token })).status).toBe(409);
-    const demote = await api(server, 'PATCH', `/api/users/${me.id}`, { token, body: { role: 'viewer' } });
+    expect((await api(server, 'DELETE', `/api/users/${me.id}`, { token, body: { reauth_password } })).status).toBe(409);
+    const demote = await api(server, 'PATCH', `/api/users/${me.id}`, { token, body: { role: 'viewer', reauth_password } });
     expect(demote.status).toBe(409);
-    expect((await api(server, 'DELETE', `/api/users/${created.body.id}`, { token })).status).toBe(204);
+    expect((await api(server, 'DELETE', `/api/users/${vuser.id}`, { token, body: { reauth_password } })).status).toBe(204);
     // Deleting the user revoked the session.
     expect((await api(server, 'GET', '/api/auth/me', { token: vtoken })).status).toBe(401);
   });

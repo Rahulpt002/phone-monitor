@@ -24,6 +24,12 @@ export class IngestBatch {
   /** Command records as they will be once this batch commits (later items see earlier changes). */
   commands = new Map<string, CommandRecord>();
 
+  /**
+   * @param loaded Stored records of reported commands that are no longer in memory (final ones),
+   *   so a late report applies the same way whether or not it shares a frame with earlier ones.
+   */
+  constructor(readonly loaded: ReadonlyMap<string, CommandRecord> = new Map()) {}
+
   add(stmt: Stmt): number {
     this.stmts.push(stmt);
     return this.stmts.length - 1;
@@ -122,18 +128,59 @@ async function commit(ctx: AppContext, dev: DeviceRuntime, batch: IngestBatch): 
   }
 }
 
+const ITEM_ERROR = /SQLITE_(CONSTRAINT|MISMATCH|TOOBIG)|constraint failed|datatype mismatch|string or blob too big/i;
+
+/**
+ * True only for errors that clearly concern one statement's data (a constraint or type mismatch).
+ * Everything else (SQLITE_FULL, READONLY, BUSY, IOERR, Turso blocking writes, network errors,
+ * unknown errors) means the database cannot take writes right now.
+ */
+export function isItemError(err: unknown): boolean {
+  const parts: string[] = [];
+  let e: unknown = err;
+  for (let depth = 0; depth < 3 && e && typeof e === 'object'; depth++) {
+    const o = e as { code?: unknown; message?: unknown; cause?: unknown };
+    if (typeof o.code === 'string') parts.push(o.code);
+    if (typeof o.message === 'string') parts.push(o.message);
+    e = o.cause;
+  }
+  return ITEM_ERROR.test(parts.join(' '));
+}
+
+export class StorageUnavailableError extends Error {
+  constructor(cause: unknown) {
+    super('the database rejected every buffered message of the group', { cause });
+    this.name = 'StorageUnavailableError';
+  }
+}
+
 /**
  * Stores buffered messages idempotently and returns the seq to acknowledge (docs/protocol.md
  * 3.2). Every processed item is acknowledged, including the ones that are dropped: malformed or
- * semantically invalid items, reports for unknown commands, and items the database refuses.
- * Otherwise the Agent would resend them forever and its outbox would never drain.
+ * semantically invalid items, reports for unknown commands, and items the database refuses
+ * because of their data. Otherwise the Agent would resend them forever and its outbox would never
+ * drain.
  *
- * The group is written in one transaction. If that fails, the items are written one by one so a
- * single item the database rejects cannot block the rest; an item is dropped only while the
- * database still answers (a failed `SELECT 1` means an outage, so nothing is acknowledged and the
- * Agent resends the whole group later, which is safe because storage is idempotent).
+ * The group is written in one transaction. When the database cannot take writes (any error other
+ * than a constraint or type mismatch) this throws and nothing is acknowledged: the Agent keeps the
+ * rows and resends them later, which is safe because storage is idempotent. When the group failed
+ * on an item's data, the items are written one by one so that item is dropped and the rest are
+ * stored; if every item fails, it is treated as an outage too (F03).
  */
 export async function storeBuffered(ctx: AppContext, dev: DeviceRuntime, items: unknown[]): Promise<StoreResult> {
+  dev.storing++;
+  dev.bufferedAt = ctx.clock.now();
+  try {
+    const r = await storeItems(ctx, dev, items);
+    dev.ackedSinceOutbox += items.length;
+    return r;
+  } finally {
+    dev.storing--;
+    dev.bufferedAt = ctx.clock.now();
+  }
+}
+
+async function storeItems(ctx: AppContext, dev: DeviceRuntime, items: unknown[]): Promise<StoreResult> {
   let ackSeq: number | null = null;
   let skipped = 0;
   const valid: Plain[] = [];
@@ -147,34 +194,39 @@ export async function storeBuffered(ctx: AppContext, dev: DeviceRuntime, items: 
     valid.push(item);
   }
 
-  const batch = new IngestBatch();
+  const batch = new IngestBatch(await ctx.commands.loadReported(dev, valid));
   let planSkipped = 0;
   for (const item of valid) if (!planItem(ctx, batch, dev, item)) planSkipped++;
   try {
     await commit(ctx, dev, batch);
     return { ackSeq, stored: items.length - skipped - planSkipped, skipped: skipped + planSkipped };
   } catch (err) {
-    ctx.log.warn({ err, device_id: dev.id, items: valid.length }, 'group write failed; storing items one by one');
+    if (!isItemError(err)) throw err; // the database cannot take writes: acknowledge nothing
+    ctx.log.warn({ err, device_id: dev.id, items: valid.length }, 'group write failed on an item; storing items one by one');
   }
 
   // Nothing of the group was written (one transaction) and no after-commit step ran, so every
-  // item is planned again on its own, in order, against the committed in-memory state.
+  // item is planned again on its own, in order, against the committed state.
+  let writes = 0;
+  let rejected = 0;
+  let lastErr: unknown = null;
   for (const item of valid) {
-    let stored = false;
-    for (let attempt = 0; attempt < 2 && !stored; attempt++) {
-      const one = new IngestBatch();
-      if (!planItem(ctx, one, dev, item)) break;
-      try {
-        await commit(ctx, dev, one);
-        stored = true;
-      } catch (err) {
-        if (!(await ctx.db.ping())) throw err; // database unreachable: acknowledge nothing
-        if (attempt === 1) {
-          ctx.log.error({ err, device_id: dev.id, t: item.t, seq: item.seq }, 'database rejected a buffered message; dropped');
-        }
-      }
+    const one = new IngestBatch(await ctx.commands.loadReported(dev, [item]));
+    if (!planItem(ctx, one, dev, item)) {
+      skipped++;
+      continue;
     }
-    if (!stored) skipped++;
+    if (one.stmts.length) writes++;
+    try {
+      await commit(ctx, dev, one);
+    } catch (err) {
+      if (!isItemError(err)) throw err;
+      rejected++;
+      skipped++;
+      lastErr = err;
+      ctx.log.error({ err, device_id: dev.id, t: item.t, seq: item.seq }, 'database rejected a buffered message; dropped');
+    }
   }
+  if (writes > 0 && rejected === writes) throw new StorageUnavailableError(lastErr);
   return { ackSeq, stored: items.length - skipped, skipped };
 }

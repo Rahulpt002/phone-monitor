@@ -55,6 +55,34 @@ export interface HsmServer {
 }
 
 const BODY_LIMIT = 256 * 1024;
+/**
+ * permessage-deflate for the Agent socket (plan 8.2 data budget, F33): JSON telemetry compresses
+ * several-fold. OkHttp negotiates it and compresses its own messages from 1 KiB; the Server does
+ * the same for what it sends. Dashboards do not negotiate it (see the /ws/dashboard route).
+ */
+const AGENT_DEFLATE = {
+  threshold: 1024,
+  concurrencyLimit: 10,
+  zlibDeflateOptions: { level: 6, memLevel: 8 },
+} as const;
+/** Longest a shutdown waits for pending "back online" alerts. */
+const SHUTDOWN_ALERT_WAIT_MS = 5_000;
+
+/** Resolves when `p` settles or after `ms`, whichever comes first (never rejects). */
+async function settleWithin(p: Promise<unknown>, ms: number): Promise<void> {
+  let timer: NodeJS.Timeout | undefined;
+  await Promise.race([
+    p.then(
+      () => undefined,
+      () => undefined,
+    ),
+    new Promise<void>((resolve) => {
+      timer = setTimeout(resolve, ms);
+      timer.unref();
+    }),
+  ]);
+  if (timer) clearTimeout(timer);
+}
 
 function defaultLogger(config: Config): FastifyServerOptions['logger'] {
   const opts: Record<string, unknown> = {
@@ -64,6 +92,7 @@ function defaultLogger(config: Config): FastifyServerOptions['logger'] {
         'req.headers.authorization',
         'req.headers.cookie',
         '*.password',
+        '*.reauth_password',
         '*.token',
         '*.device_token',
         '*.pending_token',
@@ -139,7 +168,7 @@ export async function buildServer(config: Config, options: BuildOptions = {}): P
       new ApiHttpError(429, 'rate_limited', `Too many requests. Try again in ${context.after}.`),
   });
   await app.register(fastifyWebsocket, {
-    options: { maxPayload: PROTOCOL.max_message_bytes },
+    options: { maxPayload: PROTOCOL.max_message_bytes, perMessageDeflate: AGENT_DEFLATE },
     preClose(done) {
       ctx.hub.closeAll(1001, 'server shutting down');
       const wss = app.websocketServer;
@@ -187,7 +216,18 @@ export async function buildServer(config: Config, options: BuildOptions = {}): P
 
   // --- routes ----------------------------------------------------------------------------------
   app.get('/ws/agent', { websocket: true }, (socket, req) => handleAgentSocket(ctx, socket, req));
-  app.get('/ws/dashboard', { websocket: true }, (socket, req) => handleDashboardSocket(ctx, socket, req));
+  app.get(
+    '/ws/dashboard',
+    {
+      websocket: true,
+      // The upgrade happens after this hook: without the offer, ws does not negotiate compression
+      // for Dashboards (many small broadcast frames; only the Agent's data budget needs it).
+      onRequest: async (req) => {
+        delete req.raw.headers['sec-websocket-extensions'];
+      },
+    },
+    (socket, req) => handleDashboardSocket(ctx, socket, req),
+  );
   registerHealthRoute(app, ctx);
   const guards = makeGuards(ctx);
   await app.register(
@@ -223,6 +263,11 @@ export async function buildServer(config: Config, options: BuildOptions = {}): P
       closed = true;
       jobs.stop();
       ctx.hub.closeAll(1001, 'server shutting down');
+      // "Back online" alerts still waiting for the backlog live in memory only (F24).
+      await settleWithin(
+        ctx.alerts.processPendingBackOnline(true).catch((err) => app.log.error({ err }, 'failed to send pending alerts during shutdown')),
+        SHUTDOWN_ALERT_WAIT_MS,
+      );
       try {
         await ctx.devices.flush();
         await ctx.telemetry.rollupDirty(true);

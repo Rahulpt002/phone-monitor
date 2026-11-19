@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { ConfigError, loadConfig, trustProxyOption } from '../src/config.js';
+import { configWarnings, ConfigError, loadConfig, trustProxyOption } from '../src/config.js';
 
 describe('loadConfig', () => {
   it('has local-development defaults', () => {
@@ -11,7 +11,7 @@ describe('loadConfig', () => {
       sessionTtlDays: 30,
       corsOrigins: [],
       logLevel: 'info',
-      trustProxy: true,
+      trustProxy: false,
       adminUsername: null,
       adminPassword: null,
     });
@@ -53,6 +53,21 @@ describe('loadConfig', () => {
     expect(loadConfig({ TRUST_PROXY: 'off' }).trustProxy).toBe(false);
     expect(loadConfig({ TRUST_PROXY: '10.0.0.0/8, 127.0.0.1' }).trustProxy).toBe('10.0.0.0/8, 127.0.0.1');
     expect(() => loadConfig({ TRUST_PROXY: '500' })).toThrow(ConfigError);
+  });
+
+  it('defaults TRUST_PROXY to false, or to one hop on Render, never to true (F20)', () => {
+    expect(loadConfig({}).trustProxy).toBe(false);
+    expect(loadConfig({ TRUST_PROXY: '' }).trustProxy).toBe(false);
+    expect(loadConfig({ RENDER: 'true' }).trustProxy).toBe(1);
+    expect(loadConfig({ RENDER_EXTERNAL_URL: 'https://hsm.onrender.com' }).trustProxy).toBe(1);
+    expect(loadConfig({ RENDER: 'true', TRUST_PROXY: '2' }).trustProxy).toBe(2);
+    expect(loadConfig({ RENDER: 'true', TRUST_PROXY: 'false' }).trustProxy).toBe(false);
+  });
+
+  it('warns about TRUST_PROXY=true only', () => {
+    expect(configWarnings(loadConfig({ TRUST_PROXY: 'true' }))).toEqual([expect.stringContaining('TRUST_PROXY=true')]);
+    expect(configWarnings(loadConfig({}))).toEqual([]);
+    expect(configWarnings(loadConfig({ TRUST_PROXY: '1' }))).toEqual([]);
   });
 
   it('turns a hop count into a trust function (Fastify 5 ignores numbers)', () => {

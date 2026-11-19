@@ -6,18 +6,27 @@ import { sendJson } from './hub.js';
 
 export const DASH_AUTH_TIMEOUT_MS = 10_000;
 const MAX_BAD_MESSAGES = 10;
+const WS_OPEN = 1;
 
-/** WS /ws/dashboard (docs/protocol.md section 5). */
+/**
+ * WS /ws/dashboard (docs/protocol.md section 5).
+ *
+ * Close codes: 4001 + auth_failed only when the session definitely does not exist, has expired or
+ * has no TOTP yet (the client signs out or goes to enrollment). When the session lookup fails or
+ * does not finish within DASH_AUTH_TIMEOUT_MS (database trouble, e.g. every Dashboard reconnecting
+ * after a deploy), or no auth arrives in time, 1013 "try again later": the client keeps its token
+ * and reconnects with backoff.
+ */
 export function handleDashboardSocket(ctx: AppContext, socket: WebSocket, _req: FastifyRequest): void {
   const conn = ctx.hub.addDashboard(socket);
   const timer = setTimeout(() => {
     if (conn.user) return;
-    sendJson(socket, { t: 'auth_failed', message: 'authentication timeout' });
-    socket.close(4001, 'auth timeout');
+    socket.close(1013, 'auth timeout');
   }, DASH_AUTH_TIMEOUT_MS);
   timer.unref?.();
 
   const fail = (message: string) => {
+    clearTimeout(timer);
     sendJson(socket, { t: 'auth_failed', message });
     socket.close(4001, 'unauthorized');
   };
@@ -26,8 +35,20 @@ export function handleDashboardSocket(ctx: AppContext, socket: WebSocket, _req: 
     switch (msg.t) {
       case 'auth': {
         if (conn.user) return;
-        const info = typeof msg.token === 'string' ? await ctx.auth.authenticate(msg.token) : null;
+        if (typeof msg.token !== 'string') return fail('invalid or expired session');
+        let info;
+        try {
+          info = await ctx.auth.authenticate(msg.token);
+        } catch (err) {
+          ctx.log.warn({ err }, 'dashboard session lookup failed; asking the client to retry');
+          clearTimeout(timer);
+          socket.close(1013, 'try again later');
+          return;
+        }
+        // Timed out (1013) or closed by the client while the lookup ran.
+        if (socket.readyState !== WS_OPEN) return;
         if (!info) return fail('invalid or expired session');
+        if (ctx.auth.needsTotpEnrollment(info.user)) return fail('totp_enrollment_required');
         clearTimeout(timer);
         conn.user = ctx.auth.userInfo(info.user);
         conn.sessionHash = info.sessionHash;

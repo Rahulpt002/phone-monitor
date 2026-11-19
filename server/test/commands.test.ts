@@ -15,6 +15,7 @@ import {
   makeServer,
   msgsOfType,
   pairDevice,
+  userWithTotp,
 } from './helpers.js';
 
 describe('command pipeline', () => {
@@ -168,14 +169,38 @@ describe('command pipeline', () => {
     expect((await api(server, 'POST', '/api/commands/c_unknown/keep', { token })).status).toBe(404);
   });
 
-  it('updates settings.watchdog.charge_limit_pct for charge_limit', async () => {
+  it('updates settings.watchdog.charge_limit_pct for charge_limit only once the Agent applied it', async () => {
     const agent = connectFakeAgent(server, dev);
     const v = dev.settingsVersion;
+    const before = dev.settings.watchdog.charge_limit_pct;
     const r = await send({ name: 'charge_limit', args: { percent: 55 } });
     expect(r.status).toBe(201);
+    // Not yet: an expired or rejected command must never take effect later (F34).
+    expect(dev.settings.watchdog.charge_limit_pct).toBe(before);
+    expect(dev.settingsVersion).toBe(v);
+    await ingest(server, dev, { t: 'cmd_ack', seq: 1, id: r.body.id, accepted: true, ts: iso(clock.now()) });
+    expect(dev.settingsVersion).toBe(v);
+    await ingest(server, dev, { t: 'cmd_result', seq: 2, id: r.body.id, ok: true, output: '', duration_ms: 4, ts: iso(clock.now()) });
     expect(dev.settings.watchdog.charge_limit_pct).toBe(55);
     expect(dev.settingsVersion).toBe(v + 1);
     expect(msgsOfType(agent, 'settings')[0]).toMatchObject({ version: v + 1 });
+  });
+
+  it('leaves the charge limit setting alone when charge_limit expires, is rejected or fails', async () => {
+    const before = dev.settings.watchdog.charge_limit_pct;
+    const v = dev.settingsVersion;
+    // Offline: never delivered, expires.
+    await send({ name: 'charge_limit', args: { percent: 60 } });
+    clock.advance(61_000);
+    await server.ctx.commands.expireDue();
+    connectFakeAgent(server, dev);
+    await server.ctx.commands.deliverQueued(dev.id);
+    const rejected = await send({ name: 'charge_limit', args: { percent: 65 } });
+    await ingest(server, dev, { t: 'cmd_ack', seq: 1, id: rejected.body.id, accepted: false, reason: 'unsupported', ts: iso(clock.now()) });
+    const failed = await send({ name: 'charge_limit', args: { percent: 70 } });
+    await ingest(server, dev, { t: 'cmd_result', seq: 2, id: failed.body.id, ok: false, error: 'no charge control', duration_ms: 3, ts: iso(clock.now()) });
+    expect(dev.settings.watchdog.charge_limit_pct).toBe(before);
+    expect(dev.settingsVersion).toBe(v);
   });
 
   it('truncates output to 64 KiB', async () => {
@@ -204,8 +229,8 @@ describe('command pipeline', () => {
     connectFakeAgent(server, dev);
     const r = await send({ name: 'shell', args: { cmd: 'id' }, confirmed: true, password: ADMIN.password });
     await ingest(server, dev, { t: 'cmd_result', seq: 1, id: r.body.id, ok: true, output: 'uid=0(root)', duration_ms: 3, ts: iso(clock.now()) });
-    await api(server, 'POST', '/api/users', { token, body: { username: 'viewer', password: 'viewer-password', role: 'viewer' } });
-    const vt = (await api(server, 'POST', '/api/auth/login', { body: { username: 'viewer', password: 'viewer-password' } })).body.token;
+    // Viewers need TOTP too (plan 10); creating a user needs the admin's password.
+    const { token: vt } = await userWithTotp(server, clock, token, { username: 'viewer', password: 'viewer-password', role: 'viewer' });
     const list = await api(server, 'GET', '/api/commands', { token: vt });
     expect(list.body[0]).toMatchObject({ name: 'shell', args: {}, output: null });
   });

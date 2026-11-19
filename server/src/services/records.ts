@@ -59,15 +59,25 @@ export class RecordService {
       ],
     });
     batch.after((results) => {
-      if ((results[idx]?.rowsAffected ?? 0) === 0) return;
-      this.ctx.hub.broadcastDevice(
-        dev.id,
-        { t: 'event', device_id: dev.id, event },
-        { viewerMsg: { t: 'event', device_id: dev.id, event: redactEventForViewer(event) } },
-      );
+      if ((results[idx]?.rowsAffected ?? 0) === 0) {
+        // Already stored. Usually a resend whose alert already went out, but it may be the resend of
+        // a group whose commit response was lost before this step ran (F46): the alert service
+        // checks whether this event's alert exists.
+        this.ctx.alerts.onDuplicateEvent(dev, event, ts);
+        return;
+      }
+      this.broadcastEvent(dev.id, event);
       this.ctx.alerts.onEvent(dev, event, ts);
     });
     return true;
+  }
+
+  broadcastEvent(deviceId: string, event: AgentEvent): void {
+    this.ctx.hub.broadcastDevice(
+      deviceId,
+      { t: 'event', device_id: deviceId, event },
+      { viewerMsg: { t: 'event', device_id: deviceId, event: redactEventForViewer(event) } },
+    );
   }
 
   planSms(batch: IngestBatch, dev: DeviceRuntime, item: Plain): boolean {
@@ -123,7 +133,7 @@ export class RecordService {
     return rows.map(rowToEvent);
   }
 
-  /** Events kinds in a time window, used for the "back online" reason. */
+  /** Events kinds in a time window (phone time). */
   async eventsBetween(deviceId: string, from: number, to: number, kinds: string[], limit = 20): Promise<StoredEvent[]> {
     const rows = await this.ctx.db.all(
       `SELECT * FROM events WHERE device_id = ? AND ts >= ? AND ts <= ? AND kind IN (${kinds.map(() => '?').join(', ')})
@@ -131,6 +141,28 @@ export class RecordService {
       [deviceId, from, to, ...kinds, limit],
     );
     return rows.map(rowToEvent);
+  }
+
+  /**
+   * Reason events for the "back online" alert (docs/protocol.md 6): only events that reached the
+   * Server after the reconnect (`received_at`), so events delivered live before the outage are never
+   * named. Their phone time must fall in the outage; kinds in `lookbackKinds` (things that can
+   * cause a blackout, such as a watchdog reboot) may be up to `lookbackMs` older. The newest `limit`
+   * are returned, oldest first.
+   */
+  async backOnlineReasons(
+    deviceId: string,
+    q: { receivedFrom: number; offlineFrom: number; kinds: readonly string[]; lookbackKinds: readonly string[]; lookbackMs: number; limit: number },
+  ): Promise<StoredEvent[]> {
+    const ph = (a: readonly unknown[]) => a.map(() => '?').join(', ');
+    const rows = await this.ctx.db.all(
+      `SELECT * FROM events
+       WHERE device_id = ? AND received_at >= ? AND kind IN (${ph(q.kinds)})
+         AND ts >= CASE WHEN kind IN (${ph(q.lookbackKinds)}) THEN ? ELSE ? END
+       ORDER BY ts DESC, received_at DESC LIMIT ?`,
+      [deviceId, q.receivedFrom, ...q.kinds, ...q.lookbackKinds, q.offlineFrom - q.lookbackMs, q.offlineFrom, q.limit],
+    );
+    return rows.map(rowToEvent).reverse();
   }
 
   async listSms(dev: DeviceRuntime, limit: number, before: number | null): Promise<SmsRecord[]> {

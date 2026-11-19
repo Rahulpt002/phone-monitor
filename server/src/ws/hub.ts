@@ -219,11 +219,16 @@ export class Hub {
     this.deliver(this.dashboards, msg, opts);
   }
 
-  closeDashboards(pred: (c: DashConn) => boolean, reason: string): void {
+  /**
+   * Closes matching Dashboard sockets. 4001 (default): the session is gone, the client signs out.
+   * 4004: the session is still valid but what it may see changed (role, TOTP): the client
+   * reconnects, re-authenticates and refetches /api/auth/me (docs/protocol.md 7).
+   */
+  closeDashboards(pred: (c: DashConn) => boolean, reason: string, code: 4001 | 4004 = 4001): void {
     for (const c of [...this.dashboards]) {
       if (!pred(c)) continue;
       this.dashboards.delete(c);
-      c.socket.close(4001, reason.slice(0, 100));
+      c.socket.close(code, reason.slice(0, 100));
     }
     this.refreshRates();
   }

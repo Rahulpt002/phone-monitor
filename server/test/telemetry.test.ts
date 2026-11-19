@@ -4,7 +4,7 @@ import { downsample, MAX_POINTS, minuteOf } from '../src/services/telemetry.js';
 import type { HsmServer } from '../src/server.js';
 import { iso } from '../src/util.js';
 import {
-  ADMIN,
+  adminWithTotp,
   api,
   connectFakeDashboard,
   type FakeClock,
@@ -40,7 +40,8 @@ describe('telemetry ingest, rollup and history', () => {
   beforeEach(async () => {
     ({ server, clock } = await makeServer());
     ({ dev } = await pairDevice(server));
-    token = (await api(server, 'POST', '/api/auth/login', { body: ADMIN })).body.token;
+    // Plan 10: reads need TOTP too (MeResponse.totp_enrollment_required).
+    ({ token } = await adminWithTotp(server, clock));
   });
   afterEach(async () => server.close());
 

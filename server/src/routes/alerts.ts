@@ -29,7 +29,8 @@ export function registerAlertRoutes(app: FastifyInstance, ctx: AppContext, g: Gu
 
   app.post('/push/subscribe', { preHandler: g.user }, async (req, reply) => {
     const b = parseOrThrow(SubscribeSchema, req.body, 'request');
-    await ctx.push.subscribe(authOf(req).user.id, b.subscription, userAgent(req));
+    const a = authOf(req);
+    await ctx.push.subscribe(a.user.id, b.subscription, userAgent(req), a.sessionHash);
     return reply.code(204).send();
   });
 

@@ -147,6 +147,18 @@ describe('client IP behind a proxy (TRUST_PROXY)', () => {
     expect(await seen(false)).toEqual({ ip: '10.1.2.3', protocol: 'http' });
   });
 
+  it('logs a startup warning for TRUST_PROXY=true', async () => {
+    const lines: string[] = [];
+    const logger = { level: 'warn', stream: { write: (s: string) => void lines.push(s) } };
+    const { server } = await makeServer({ config: { trustProxy: true }, logger });
+    await server.close();
+    expect(lines.some((l) => l.includes('TRUST_PROXY=true'))).toBe(true);
+    lines.length = 0;
+    const { server: safe } = await makeServer({ config: { trustProxy: 1 }, logger });
+    await safe.close();
+    expect(lines.some((l) => l.includes('TRUST_PROXY'))).toBe(false);
+  });
+
   it('a client cannot dodge the login rate limit by forging X-Forwarded-For', async () => {
     const { server } = await makeServer({ config: { trustProxy: 1 } });
     try {

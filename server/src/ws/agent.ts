@@ -34,6 +34,7 @@ export function handleAgentSocket(ctx: AppContext, socket: WebSocket, req: Fasti
 
   const conn: AgentConn = ctx.hub.registerAgent(dev.id, socket);
   const now = ctx.clock.now();
+  const firstContact = dev.lastSeen == null;
   ctx.alerts.onAgentActivity(dev);
   ctx.devices.touch(dev);
   dev.connectedSince = now;
@@ -48,7 +49,12 @@ export function handleAgentSocket(ctx: AppContext, socket: WebSocket, req: Fasti
     settings_version: dev.settingsVersion,
     rates,
   });
-  ctx.devices.broadcastStatus(dev);
+  if (firstContact) {
+    // A phone's first connection: Dashboards watching every device may not know it yet.
+    ctx.hub.broadcastDevice(dev.id, { t: 'snapshot', device: ctx.devices.snapshot(dev) });
+  } else {
+    ctx.devices.broadcastStatus(dev);
+  }
   ctx.log.info({ device_id: dev.id, ip: req.ip }, 'agent connected');
   ctx.commands.deliverQueued(dev.id).catch((err) => ctx.log.error({ err }, 'failed to deliver queued commands'));
 
@@ -62,6 +68,8 @@ export function handleAgentSocket(ctx: AppContext, socket: WebSocket, req: Fasti
   };
 
   const enqueue = (items: unknown[]) => {
+    // The backlog is still arriving ("back online" waits for it to drain).
+    dev.bufferedAt = ctx.clock.now();
     conn.queue = conn.queue.then(async () => {
       if (conn.closed || !ctx.devices.get(dev.id)) return;
       try {
@@ -76,9 +84,14 @@ export function handleAgentSocket(ctx: AppContext, socket: WebSocket, req: Fasti
   };
 
   const onHeartbeat = (msg: Plain) => {
-    if (isNum(msg.outbox)) dev.outbox = Math.max(0, Math.round(msg.outbox));
-    dev.dirty = true;
     const t = ctx.clock.now();
+    if (isNum(msg.outbox)) {
+      dev.outbox = Math.max(0, Math.round(msg.outbox));
+      dev.outboxAt = t;
+      dev.ackedSinceOutbox = 0;
+      if (dev.outbox === 0) dev.outboxZeroAt = t;
+    }
+    dev.dirty = true;
     if (
       isNum(msg.settings_version) &&
       msg.settings_version !== dev.settingsVersion &&

@@ -2,14 +2,17 @@ import {
   ALERT_KINDS,
   DEFAULT_SETTINGS,
   mergeSettings,
+  type AgentEvent,
   type AlertKind,
   type Settings,
   type SettingsResponse,
 } from '@hsm/shared';
 import { z } from 'zod';
+import type { AuthInfo, UserRow } from '../auth/service.js';
 import type { AppContext } from '../context.js';
-import { badRequest, formatZodError } from '../errors.js';
-import { isPlainObject } from '../util.js';
+import type { Stmt } from '../db/client.js';
+import { badRequest, conflict, formatZodError } from '../errors.js';
+import { iso, isPlainObject, randomId } from '../util.js';
 import type { DeviceRuntime } from './devices.js';
 
 const int = (min: number, max: number) => z.number().int().min(min).max(max);
@@ -156,33 +159,121 @@ export function normalizeStoredSettings(raw: unknown): Settings {
   return v.ok ? v.settings : structuredClone(DEFAULT_SETTINGS);
 }
 
+/** Order-independent comparison of JSON values. */
+export function jsonEqual(a: unknown, b: unknown): boolean {
+  if (a === b) return true;
+  if (Array.isArray(a) || Array.isArray(b)) {
+    return Array.isArray(a) && Array.isArray(b) && a.length === b.length && a.every((x, i) => jsonEqual(x, b[i]));
+  }
+  if (!isPlainObject(a) || !isPlainObject(b)) return false;
+  const ka = Object.keys(a).filter((k) => a[k] !== undefined);
+  const kb = Object.keys(b).filter((k) => b[k] !== undefined);
+  return ka.length === kb.length && ka.every((k) => k in b && jsonEqual(a[k], b[k]));
+}
+
+/**
+ * Dotted paths whose values differ. Arrays and profile_override (replaced as a whole) count as
+ * one value each.
+ */
+export function changedPaths(before: unknown, after: unknown, prefix = ''): string[] {
+  if (prefix !== 'profile_override' && isPlainObject(before) && isPlainObject(after)) {
+    const keys = [...new Set([...Object.keys(before), ...Object.keys(after)])].sort();
+    return keys.flatMap((k) => changedPaths(before[k], after[k], prefix ? `${prefix}.${k}` : k));
+  }
+  return jsonEqual(before, after) ? [] : [prefix];
+}
+
+/** Who changes the settings through PUT /api/settings (audit and re-authentication). */
+export interface SettingsActor {
+  user: UserRow;
+  /** The request's session, so failed password re-entries count per session (F39). */
+  auth?: AuthInfo;
+  /** The admin's own password; needed when profile_override changes (it holds root shell templates). */
+  password?: unknown;
+  ip: string;
+}
+
 /**
  * Per-device settings (docs/protocol.md 3.4). The Server owns them: PUT deep-merges, validates,
  * increments the version, persists, pushes to the Agent and broadcasts to Dashboards.
  */
 export class SettingsService {
+  /** Updates of one device run one after another, each merging over the last committed copy. */
+  private chains = new Map<string, Promise<unknown>>();
+
   constructor(private ctx: AppContext) {}
 
   get(dev: DeviceRuntime): SettingsResponse {
     return { device_id: dev.id, settings: dev.settings, version: dev.settingsVersion };
   }
 
-  async update(dev: DeviceRuntime, patch: unknown): Promise<SettingsResponse> {
+  private serialize<T>(deviceId: string, fn: () => Promise<T>): Promise<T> {
+    const prev = this.chains.get(deviceId) ?? Promise.resolve();
+    const run = prev.then(fn, fn);
+    const tail = run.then(
+      () => undefined,
+      () => undefined,
+    );
+    this.chains.set(deviceId, tail);
+    void tail.then(() => {
+      if (this.chains.get(deviceId) === tail) this.chains.delete(deviceId);
+    });
+    return run;
+  }
+
+  /**
+   * Deep-merges `patch`, validates, and writes the new settings and version before memory, the
+   * Agent and Dashboards see them (F47). With an `actor` (PUT /api/settings), a change to
+   * profile_override needs the actor's password, and the change is recorded as a
+   * `settings_changed` event (F01).
+   */
+  async update(dev: DeviceRuntime, patch: unknown, actor?: SettingsActor): Promise<SettingsResponse> {
     if (!isPlainObject(patch)) throw badRequest('settings must be an object');
-    const merged = mergeSettings(dev.settings, patch);
-    const v = validateSettings(merged);
-    if (!v.ok) throw badRequest(`Invalid settings: ${v.message}`);
-    // Update memory first so concurrent requests merge over the newest copy.
-    dev.settings = v.settings;
-    dev.settingsVersion += 1;
-    const version = dev.settingsVersion;
-    await this.ctx.db.run('UPDATE devices SET settings = ?, settings_version = ? WHERE id = ?', [
-      JSON.stringify(v.settings),
-      version,
-      dev.id,
-    ]);
-    this.push(dev);
-    return this.get(dev);
+    return this.serialize(dev.id, async () => {
+      const before = dev.settings;
+      const v = validateSettings(mergeSettings(before, patch));
+      if (!v.ok) throw badRequest(`Invalid settings: ${v.message}`);
+      const changed = changedPaths(before, v.settings);
+      const overrideChanged = changed.includes('profile_override');
+      if (actor && overrideChanged) await this.ctx.auth.reauth(actor.auth ?? actor.user, actor.password, actor.ip);
+
+      const oldVersion = dev.settingsVersion;
+      const version = oldVersion + 1;
+      const stmts: Stmt[] = [
+        {
+          sql: 'UPDATE devices SET settings = ?, settings_version = ? WHERE id = ? AND settings_version = ?',
+          args: [JSON.stringify(v.settings), version, dev.id, oldVersion],
+        },
+      ];
+      let event: AgentEvent | null = null;
+      if (actor) {
+        const now = this.ctx.clock.now();
+        const list = changed.length ? changed.join(', ') : 'no values changed';
+        event = {
+          id: randomId('srv_', 8),
+          ts: iso(now),
+          kind: 'settings_changed',
+          severity: overrideChanged ? 'warning' : 'info',
+          message: `Settings changed by ${actor.user.username} (version ${version}): ${list}`.slice(0, 2000),
+          data: { user: actor.user.username, version, changed, profile_override_changed: overrideChanged },
+        };
+        // Written only together with the settings it describes.
+        stmts.push({
+          sql: `INSERT INTO events (device_id, id, ts, kind, severity, message, data, received_at)
+                SELECT ?, ?, ?, ?, ?, ?, ?, ? WHERE EXISTS (SELECT 1 FROM devices WHERE id = ? AND settings_version = ?)`,
+          args: [dev.id, event.id, now, event.kind, event.severity, event.message, JSON.stringify(event.data), now, dev.id, version],
+        });
+      }
+      const results = await this.ctx.db.batch(stmts);
+      if ((results[0]?.rowsAffected ?? 0) === 0) {
+        throw conflict('The settings were changed or the phone was removed meanwhile; reload and try again');
+      }
+      dev.settings = v.settings;
+      dev.settingsVersion = version;
+      this.push(dev);
+      if (event) this.ctx.records.broadcastEvent(dev.id, event);
+      return this.get(dev);
+    });
   }
 
   /** Sends the current settings to the Agent (if connected) and every watching Dashboard. */

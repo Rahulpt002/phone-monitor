@@ -1,3 +1,4 @@
+import { COMMANDS } from '@hsm/shared';
 import type { Db } from './client.js';
 
 /**
@@ -168,17 +169,68 @@ const MIGRATIONS: { version: number; statements: string[] }[] = [
       )`,
     ],
   },
+  {
+    // A push subscription belongs to the session that created it (sessions.token_hash) and is
+    // deleted with it. Existing rows keep NULL: AuthService treats those as belonging to every
+    // session of the user, so any sign-out of that user removes them (the Dashboard registers its
+    // subscription again on its next load).
+    version: 2,
+    statements: [
+      `ALTER TABLE push_subscriptions ADD COLUMN session_hash TEXT`,
+      `CREATE INDEX push_subscriptions_session ON push_subscriptions(session_hash)`,
+    ],
+  },
+  {
+    // Secret arguments (CommandSpec.secret_args, the hotspot password) are blanked in storage once
+    // the command has reached the Agent. Rows written before that rule still hold them: remove them
+    // from every row except 'queued' and 'sent', which the Agent may still need delivered.
+    version: 3,
+    statements: scrubSecretArgsStatements(),
+  },
+  {
+    // Known-device tokens (OWASP "device cookies", F39): a browser that completed a full sign-in
+    // gets a token; its later sign-ins count failures on that token instead of the username, so
+    // wrong passwords from strangers cannot lock it out. Only the SHA-256 is stored.
+    version: 4,
+    statements: [
+      `CREATE TABLE known_devices (
+        token_hash TEXT PRIMARY KEY,
+        user_id INTEGER NOT NULL,
+        created_at INTEGER NOT NULL,
+        expires_at INTEGER NOT NULL
+      )`,
+      `CREATE INDEX known_devices_user ON known_devices(user_id)`,
+    ],
+  },
 ];
+
+function scrubSecretArgsStatements(): string[] {
+  const out: string[] = [];
+  for (const spec of Object.values(COMMANDS)) {
+    const keys = spec.secret_args ?? [];
+    if (!keys.length) continue;
+    // Names and keys are constants from shared/src/commands.ts, not user input.
+    const paths = keys.map((k) => `'$."${k}"'`).join(', ');
+    out.push(
+      `UPDATE commands SET args = json_remove(args, ${paths})
+       WHERE name = '${spec.name}' AND status NOT IN ('queued', 'sent') AND json_valid(args)`,
+    );
+  }
+  // A migration needs at least its version row; a no-op keeps it valid if no command has secrets.
+  return out.length ? out : ['SELECT 1'];
+}
 
 export const SCHEMA_VERSION = MIGRATIONS[MIGRATIONS.length - 1]?.version ?? 0;
 
-export async function migrate(db: Db): Promise<number[]> {
+/** Applies every migration not applied yet, up to `target` (tests stop early to build an old schema). */
+export async function migrate(db: Db, target: number = SCHEMA_VERSION): Promise<number[]> {
   await db.client.execute(
     'CREATE TABLE IF NOT EXISTS schema_migrations (version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL)',
   );
   const done = new Set((await db.all<{ version: number }>('SELECT version FROM schema_migrations')).map((r) => Number(r.version)));
   const applied: number[] = [];
   for (const m of MIGRATIONS) {
+    if (m.version > target) break;
     if (done.has(m.version)) continue;
     await db.batch([
       ...m.statements.map((sql) => ({ sql })),

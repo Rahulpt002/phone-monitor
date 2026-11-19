@@ -37,6 +37,14 @@ export interface DeviceRuntime {
   settings: Settings;
   settingsVersion: number;
   outbox: number | null;
+  /** When a heartbeat last reported its outbox size, and when it last reported 0 (memory only). */
+  outboxAt: number | null;
+  outboxZeroAt: number | null;
+  /** Buffered messages stored (or dropped and acknowledged) since that heartbeat. */
+  ackedSinceOutbox: number;
+  /** When a buffered Agent message last arrived or finished storing, and how many are storing now. */
+  bufferedAt: number | null;
+  storing: number;
   offlineAlertOpen: boolean;
   /** last_seen at the moment the offline alert fired. */
   offlineSince: number | null;
@@ -50,6 +58,13 @@ export interface DeviceRuntime {
 export const PAIR_ALPHABET = 'ABCDEFGHJKMNPQRSTUVWXYZ23456789';
 export const PAIR_CODE_LENGTH = 8;
 export const PAIR_CODE_TTL_MS = 15 * 60_000;
+/** Android package of the Agent (agent/app/build.gradle.kts applicationId). */
+export const AGENT_PACKAGE = 'com.hotspotmonitor.agent';
+/**
+ * A telemetry timestamp further ahead of the Server clock than this (a phone clock running ahead
+ * before the Agent learned its offset) is not trusted as "newest" or "live" (F37).
+ */
+export const FUTURE_TS_TOLERANCE_MS = 120_000;
 
 export const DeviceInfoSchema = z.looseObject({
   device_id: z.string().max(64).nullish(),
@@ -86,6 +101,11 @@ function rowToDevice(r: Record<string, unknown>): DeviceRuntime {
     settings: normalizeStoredSettings(safeJsonParse(r.settings, {})),
     settingsVersion: Number(r.settings_version ?? 1),
     outbox: r.outbox == null ? null : Number(r.outbox),
+    outboxAt: null,
+    outboxZeroAt: null,
+    ackedSinceOutbox: 0,
+    bufferedAt: null,
+    storing: 0,
     offlineAlertOpen: Number(r.offline_alert_open ?? 0) === 1,
     offlineSince: parseTs(r.offline_since),
     lastBackOnline: parseTs(r.last_back_online),
@@ -200,8 +220,10 @@ export class DeviceService {
         expires_at: iso(now + PAIR_CODE_TTL_MS),
         deep_link: deepLink,
         // Double quotes on the host keep the single quotes for the phone's shell, which would
-        // otherwise split the link at '&'. `--ez auto true` pairs without a tap (dead screen).
-        adb_command: `adb shell "am start -a android.intent.action.VIEW -d '${deepLink}' --ez auto true"`,
+        // otherwise split the link at '&'. The activity-alias .ui.AdbPair is guarded by
+        // android.permission.DUMP (adb shell or root only) and is the only entry point that
+        // honours `--ez auto true` (pair without a tap, for a dead screen); see api.ts.
+        adb_command: `adb shell "am start -n ${AGENT_PACKAGE}/.ui.AdbPair -a android.intent.action.VIEW -d '${deepLink}' --ez auto true"`,
       };
     }
     throw new Error('could not allocate a unique pairing code');
@@ -244,6 +266,11 @@ export class DeviceService {
       settings,
       settingsVersion: 1,
       outbox: null,
+      outboxAt: null,
+      outboxZeroAt: null,
+      ackedSinceOutbox: 0,
+      bufferedAt: null,
+      storing: 0,
       offlineAlertOpen: false,
       offlineSince: null,
       lastBackOnline: null,
@@ -254,6 +281,8 @@ export class DeviceService {
     this.devices.set(id, dev);
     this.byToken.set(tokenHash, id);
     this.ctx.log.info({ device_id: id, model: info.model }, 'phone paired');
+    // Dashboards subscribed to every device learn about the new phone without polling.
+    this.ctx.hub.broadcastDevice(id, { t: 'snapshot', device: this.snapshot(dev) });
     return {
       device_id: id,
       device_token: token,
@@ -306,17 +335,25 @@ export class DeviceService {
    * Merges the groups of a stored telemetry message into the current state, but only groups whose
    * stored reading is older, so a backlog upload never overwrites fresher values (protocol 3.2).
    * Returns the groups that changed.
+   *
+   * A reading dated more than FUTURE_TS_TOLERANCE_MS ahead of the Server clock counts as taken
+   * now, and a stored reading dated that far ahead never blocks a newer one, so a phone clock that
+   * ran ahead cannot freeze the state until real time catches up (F37). The stored raw row keeps
+   * the phone's timestamp (deduplication depends on it).
    */
   mergeTelemetry(dev: DeviceRuntime, msg: TelemetryMsg, tsMs: number): GroupKey[] {
     const changed: GroupKey[] = [];
     const m = msg as unknown as Record<string, unknown>;
+    const now = this.ctx.clock.now();
+    const limit = now + FUTURE_TS_TOLERANCE_MS;
+    const ts = tsMs > limit ? now : tsMs;
     for (const g of GROUP_KEYS) {
       const v = m[g];
       if (!isPlainObject(v)) continue;
       const prev = dev.stateTs[g];
-      if (prev != null && prev > tsMs) continue;
+      if (prev != null && prev > ts && prev <= limit) continue;
       (dev.state as Record<string, unknown>)[g] = v;
-      dev.stateTs[g] = tsMs;
+      dev.stateTs[g] = ts;
       changed.push(g);
     }
     if (changed.includes('device') && dev.state.device) {
@@ -362,9 +399,17 @@ export class DeviceService {
     }
   }
 
-  /** Immediate write for state that must survive a crash (offline alert open/closed). */
+  /**
+   * Immediate write for state that must survive a crash (offline alert open/closed). On failure
+   * the device stays dirty, so the 30 s flush retries it.
+   */
   async persistNow(dev: DeviceRuntime): Promise<void> {
     dev.dirty = false;
-    await this.ctx.db.batch([this.flushStmt(dev)]);
+    try {
+      await this.ctx.db.batch([this.flushStmt(dev)]);
+    } catch (err) {
+      dev.dirty = true;
+      throw err;
+    }
   }
 }

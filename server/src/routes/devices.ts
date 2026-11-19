@@ -55,7 +55,7 @@ export function registerDeviceRoutes(app: FastifyInstance, ctx: AppContext, g: G
     const b = parseOrThrow(UnpairSchema, req.body ?? {}, 'request');
     const a = authOf(req);
     const dev = deviceFromPath(ctx, req.params);
-    await ctx.auth.reauth(a.user, b.password, req.ip);
+    await ctx.auth.reauth(a, b.password, req.ip);
     await ctx.devices.unpair(dev);
     ctx.log.info({ by: a.user.username, device_id: dev.id }, 'device unpaired');
     return reply.code(204).send();
