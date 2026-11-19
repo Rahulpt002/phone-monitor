@@ -1,0 +1,5 @@
+# State files hold the simulator's device token: never commit them (nor their atomic-write temp files).
+*.sim-state*.json
+*.sim-state*.json.tmp
+.sim-state*.json
+.sim-state*.json.tmp
