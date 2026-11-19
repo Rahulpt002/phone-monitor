@@ -1,6 +1,8 @@
 /**
  * Editor for every device setting (plan 6.5 "Every threshold is editable from the Dashboard").
- * Saves a minimal deep patch with PUT /api/settings; viewers get a read-only view.
+ * Saves a minimal deep patch with PUT /api/settings; viewers get a read-only view. A change to the
+ * device profile override (it holds the shell templates the phone runs as root) asks for the
+ * admin's password, which goes along as PutSettingsRequest.password.
  */
 import type { Settings } from '@hsm/shared';
 import { useEffect, useMemo, useState } from 'react';
@@ -24,6 +26,7 @@ import { useSession } from '../../store/session';
 import { toast } from '../../store/toasts';
 import { Field, Select, Switch, TextArea, TextInput } from '../ui/forms';
 import { Button, Card, Notice, cx } from '../ui/primitives';
+import { ReauthDialog } from './ReauthDialog';
 
 /** Text shown in an input for a stored value (numbers and lists are edited as text). */
 export function toInputText(def: FieldDef, value: unknown): string {
@@ -219,6 +222,8 @@ export function SettingsEditor({ focusSection }: { focusSection?: string | null 
   const [override, setOverride] = useState(() => overrideText(server.settings.profile_override));
   const [saving, setSaving] = useState(false);
   const [saveError, setSaveError] = useState<string | null>(null);
+  /** The password prompt is open (profile override change, or the Server asked for it). */
+  const [reauth, setReauth] = useState(false);
 
   const parsedOverride = parseOverride(override);
   const effective = useMemo<Settings>(
@@ -231,6 +236,7 @@ export function SettingsEditor({ focusSection }: { focusSection?: string | null 
   const overrideError = parsedOverride.error ?? errors.profile_override ?? null;
   const errorCount = Object.keys(errors).length + (parsedOverride.error ? 1 : 0);
   const remoteChanged = server.version !== null && baseVersion !== null && server.version !== baseVersion;
+  const overrideChanged = patch != null && 'profile_override' in patch;
 
   const resetTo = (s: Settings, version: number | null) => {
     setBase(s);
@@ -268,19 +274,39 @@ export function SettingsEditor({ focusSection }: { focusSection?: string | null 
     setDraft((d) => setPath(d, path, fromInputText(def, text)));
   };
 
+  /** One PUT: the Server replaces profile_override as a whole, and the patch carries it complete. Throws. */
+  const put = async (password?: string) => {
+    if (!deviceId || !patch) return;
+    const res = await api.putSettings({ device_id: deviceId, settings: patch, ...(password ? { password } : {}) });
+    useData.getState().setSettings(res.device_id ?? deviceId, res.settings, res.version);
+    resetTo(res.settings, res.version);
+    toast.success(`Settings saved (version ${res.version}). The phone applies them when connected.`);
+  };
+
   const save = async () => {
     if (!deviceId || !patch || errorCount) return;
-    setSaving(true);
     setSaveError(null);
+    if (overrideChanged) {
+      setReauth(true);
+      return;
+    }
+    setSaving(true);
     try {
-      // One PUT: the Server replaces profile_override as a whole, and the patch carries it complete.
-      const res = await api.putSettings(deviceId, patch);
-      useData.getState().setSettings(res.device_id ?? deviceId, res.settings, res.version);
-      resetTo(res.settings, res.version);
-      toast.success(`Settings saved (version ${res.version}). The phone applies them when connected.`);
+      await put();
     } catch (e) {
-      if (isApiError(e, 'totp_enrollment_required')) useSession.getState().setTotpEnrollmentRequired(true);
-      setSaveError(errorMessage(e));
+      // The Server decides what needs the password; ask for it rather than failing.
+      if (isApiError(e, 'reauth_required')) setReauth(true);
+      else setSaveError(errorMessage(e));
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const saveWithPassword = async (password: string) => {
+    setSaving(true);
+    try {
+      await put(password);
+      setReauth(false);
     } finally {
       setSaving(false);
     }
@@ -370,6 +396,19 @@ export function SettingsEditor({ focusSection }: { focusSection?: string | null 
           </div>
         </div>
       ) : null}
+
+      <ReauthDialog
+        open={reauth}
+        onClose={() => setReauth(false)}
+        title={overrideChanged ? 'Confirm the device profile change' : 'Confirm the settings change'}
+        description={
+          overrideChanged
+            ? 'The profile override holds the charge-control paths and command templates the phone runs as root. Enter your password to save it. The change is recorded in the event log.'
+            : 'The Server asks for your password to save this change.'
+        }
+        confirmLabel="Confirm and save"
+        onConfirm={saveWithPassword}
+      />
     </div>
   );
 }

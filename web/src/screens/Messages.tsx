@@ -1,3 +1,4 @@
+import { normalizePhoneNumber } from '@hsm/shared';
 import { useMemo, useState } from 'react';
 import { useRunCommand } from '../components/commands/CommandRunner';
 import { StatusBadge } from '../components/commands/CommandStatus';
@@ -55,7 +56,8 @@ function SendSms() {
   const [touched, setTouched] = useState(false);
   const [sentId, setSentId] = useState<string | null>(null);
   const sent = useCommand(sentId);
-  const toErr = !/^\+?[0-9]{3,15}$/.test(to.replace(/[\s-]/g, '')) ? 'Enter a phone number, e.g. +919876543210.' : null;
+  // Same rule as the Agent (ArgRules.phoneNumber) and the Server: shared normalizePhoneNumber.
+  const toErr = normalizePhoneNumber(to) === null ? 'Enter a phone number, e.g. +919876543210.' : null;
   const bodyErr = !body.trim() ? 'Write a message.' : body.length > 918 ? 'At most 918 characters (6 parts).' : null;
   const seg = smsSegments(body);
 

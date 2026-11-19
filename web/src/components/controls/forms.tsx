@@ -2,7 +2,7 @@
 import { COMMANDS, rankSpots, type CommandName, type NetworkMode } from '@hsm/shared';
 import { useState, type ComponentType } from 'react';
 import { Link } from 'react-router-dom';
-import { NETWORK_MODES } from '../../lib/commandMeta';
+import { NETWORK_MODES, hotspotPasswordError } from '../../lib/commandMeta';
 import { useSpots } from '../../store/selectors';
 import { Field, Select, TextInput } from '../ui/forms';
 import { Badge, Button } from '../ui/primitives';
@@ -184,7 +184,7 @@ function HotspotBody(p: ControlBodyProps) {
   const [ssid, setSsid] = useState(tether?.hotspot_ssid ?? '');
   const [password, setPassword] = useState('');
   const ssidErr = !ssid.trim() ? 'Enter a network name.' : new TextEncoder().encode(ssid).length > 32 ? 'At most 32 bytes.' : null;
-  const pwErr = password.length < 8 ? 'At least 8 characters (WPA2).' : password.length > 63 ? 'At most 63 characters.' : null;
+  const pwErr = hotspotPasswordError(password);
   const [touched, setTouched] = useState(false);
   return (
     <form

@@ -140,6 +140,88 @@ describe('commands and auto-revert', () => {
     expect(s.commands).toHaveLength(1);
     expect(s.commands[0]!.status).toBe('kept');
   });
+  it('never lets a late REST record move a command backwards (F23)', () => {
+    const armed = command({ status: 'revert_armed', revert_confirm: 'dashboard', revert_deadline: '2026-11-19T10:22:00.000Z' });
+    let s = withSnapshot();
+    s = applyServerMessage(s, { t: 'command', command: armed });
+    s = applyServerMessage(s, { t: 'command', command: command({ status: 'kept' }) });
+    expect(pendingReverts(s, DEV)).toHaveLength(0);
+    // The POST /keep response, a reconnect reload and a REST snapshot all still say revert_armed.
+    s = mergeCommands(s, [armed]);
+    s = setSnapshot(s, snapshot({ pending_reverts: [armed] }));
+    expect(s.commands[0]!.status).toBe('kept');
+    expect(pendingReverts(s, DEV)).toHaveLength(0);
+    // Earlier lifecycle steps arriving late do not win either.
+    s = applyServerMessage(s, { t: 'command', command: command({ id: 'c_2', status: 'done', output: 'ok' }) });
+    s = mergeCommands(s, [command({ id: 'c_2', status: 'sent' }), command({ id: 'c_2', status: 'acked' })]);
+    expect(s.commands.find((c) => c.id === 'c_2')?.status).toBe('done');
+    // Forward moves still apply, including late reports after a soft expiry.
+    const delivered = { delivered_at: '2026-11-19T10:20:01.000Z' };
+    s = mergeCommands(s, [command({ id: 'c_3', status: 'expired', ...delivered })]);
+    s = applyServerMessage(s, { t: 'command', command: command({ id: 'c_3', status: 'acked', ...delivered }) });
+    expect(s.commands.find((c) => c.id === 'c_3')?.status).toBe('acked');
+    // A hard expiry (never delivered) is final.
+    s = mergeCommands(s, [command({ id: 'c_4', status: 'expired' })]);
+    s = mergeCommands(s, [command({ id: 'c_4', status: 'sent' })]);
+    expect(s.commands.find((c) => c.id === 'c_4')?.status).toBe('expired');
+  });
+  it("applies the Server's soft expiry of acked and revert_armed commands (F17)", () => {
+    const base = { delivered_at: '2026-11-19T10:20:01.000Z', acked_at: '2026-11-19T10:20:02.000Z' };
+    const armed = command({ ...base, status: 'revert_armed', revert_confirm: 'dashboard', revert_deadline: '2026-11-19T10:22:00.000Z' });
+    let s = applyServerMessage(withSnapshot(), { t: 'command', command: armed });
+    expect(pendingReverts(s, DEV)).toHaveLength(1);
+    // No cmd_revert 10 min past the deadline: the countdown ends.
+    const expired = { ...armed, status: 'expired' as const, error: 'The Agent did not report keeping or reverting the change' };
+    s = applyServerMessage(s, { t: 'command', command: expired });
+    expect(s.commands[0]!.status).toBe('expired');
+    expect(s.snapshots[DEV]!.pending_reverts).toHaveLength(0);
+    expect(pendingReverts(s, DEV)).toHaveLength(0);
+    // A stale REST copy or snapshot still saying revert_armed does not re-arm it ...
+    s = mergeCommands(s, [armed]);
+    s = setSnapshot(s, snapshot({ pending_reverts: [armed] }));
+    expect(s.commands[0]!.status).toBe('expired');
+    expect(pendingReverts(s, DEV)).toHaveLength(0);
+    // ... but the Agent's late report still counts.
+    s = applyServerMessage(s, { t: 'command', command: { ...armed, status: 'reverted' } });
+    expect(s.commands[0]!.status).toBe('reverted');
+
+    // acked with no result within the budget: no longer shown as running.
+    const acked = command({ id: 'c_5', ...base, status: 'acked' });
+    s = applyServerMessage(s, { t: 'command', command: acked });
+    s = applyServerMessage(s, { t: 'command', command: { ...acked, status: 'expired' } });
+    expect(s.commands.find((c) => c.id === 'c_5')?.status).toBe('expired');
+    s = mergeCommands(s, [acked]);
+    expect(s.commands.find((c) => c.id === 'c_5')?.status).toBe('expired');
+    s = applyServerMessage(s, { t: 'command', command: { ...acked, status: 'done', ok: true } });
+    expect(s.commands.find((c) => c.id === 'c_5')?.status).toBe('done');
+    // A finished command never goes back to expired.
+    s = applyServerMessage(s, { t: 'command', command: { ...acked, status: 'expired' } });
+    expect(s.commands.find((c) => c.id === 'c_5')?.status).toBe('done');
+  });
+  it('keeps a newer live online status over an older REST snapshot (F23)', () => {
+    // The phone went offline after the REST snapshot was produced.
+    let s = applyServerMessage(withSnapshot(), { t: 'status', device_id: DEV, online: false, last_seen: '2026-11-19T10:30:00.000Z', connected_since: null });
+    s = setSnapshot(s, snapshot({ online: true, connected_since: '2026-11-19T09:00:00.000Z', last_seen: '2026-11-19T10:29:00.000Z' }));
+    expect(s.snapshots[DEV]!.online).toBe(false);
+    expect(s.devices[0]!.online).toBe(false);
+    // It came back after an older offline snapshot was produced.
+    s = applyServerMessage(s, { t: 'status', device_id: DEV, online: true, last_seen: '2026-11-19T10:40:00.000Z', connected_since: '2026-11-19T10:40:00.000Z' });
+    s = setSnapshot(s, snapshot({ online: false, connected_since: null, last_seen: '2026-11-19T10:30:00.000Z' }));
+    expect(s.snapshots[DEV]!.online).toBe(true);
+    expect(s.snapshots[DEV]!.connected_since).toBe('2026-11-19T10:40:00.000Z');
+    // A REST snapshot that is newer than the live state still wins.
+    s = setSnapshot(s, snapshot({ online: false, connected_since: null, last_seen: '2026-11-19T11:00:00.000Z' }));
+    expect(s.snapshots[DEV]!.online).toBe(false);
+  });
+  it('never keeps secret arguments such as the hotspot password', () => {
+    const hotspot = command({ id: 'c_h', name: 'hotspot', args: { enabled: true, ssid: 'Roof', password: 'hunter2hunter2' } });
+    let s = mergeCommands(withSnapshot(), [hotspot]);
+    expect(s.commands[0]!.args).toEqual({ enabled: true, ssid: 'Roof' });
+    s = applyServerMessage(s, { t: 'command', command: { ...hotspot, status: 'done' } });
+    expect(JSON.stringify(s.commands)).not.toContain('hunter2');
+    s = applyServerMessage(s, { t: 'snapshot', device: snapshot({ pending_reverts: [{ ...hotspot, status: 'revert_armed' }] }) });
+    expect(JSON.stringify(s)).not.toContain('hunter2');
+  });
   it('finds the last result per command name', () => {
     const s = mergeCommands(initialData, [
       command({ id: 'c_a', name: 'reboot', created_at: '2026-11-19T09:00:00.000Z', status: 'done' }),

@@ -1,6 +1,7 @@
 /**
  * History for one or more metrics from GET /api/telemetry, kept live by appending matching values
- * from the Dashboard socket, and refetched after a reconnect (the socket does not replay backlog).
+ * from the Dashboard socket, and refetched after a reconnect of the Dashboard socket or of the
+ * phone (neither socket replays the backlog live).
  */
 import { METRIC_BY_KEY, type MetricKey } from '@hsm/shared';
 import { useEffect, useMemo, useRef, useState } from 'react';
@@ -20,6 +21,12 @@ export const RANGES: { value: RangeKey; label: string; ms: number }[] = [
   { value: '7d', label: '7 d', ms: 7 * 86_400_000 },
   { value: '30d', label: '30 d', ms: 30 * 86_400_000 },
 ];
+
+/**
+ * After the phone comes back online its outbox backlog is stored by the Server but not relayed
+ * live (older than live_window_s, docs/protocol.md 3.1), so charts refetch after these delays.
+ */
+export const BACKLOG_REFETCH_MS = [20_000, 90_000] as const;
 
 export const rangeMs = (r: RangeKey) => RANGES.find((x) => x.value === r)?.ms ?? 3_600_000;
 
@@ -81,8 +88,18 @@ export function useHistory(metrics: MetricKey[], range: RangeKey): HistoryState 
         results.forEach((r, i) => {
           next[metrics[i]!] = (r.points ?? []).filter((p): p is Point => Array.isArray(p) && typeof p[0] === 'number');
         });
+        const sameView = loadedFor.current === signature;
         loadedFor.current = signature;
-        setSeries(next);
+        // Keep live points appended while this request was in flight (newer than its `to`).
+        setSeries((cur) => {
+          if (!sameView) return next;
+          const out = { ...next };
+          for (const k of Object.keys(out)) {
+            const later = (cur[k] ?? []).filter((p) => p[0] > to.getTime());
+            if (later.length) out[k] = [...out[k]!, ...later];
+          }
+          return out;
+        });
         setRes(results[0]?.res ?? null);
       })
       .catch((e: unknown) => {
@@ -100,6 +117,25 @@ export function useHistory(metrics: MetricKey[], range: RangeKey): HistoryState 
     const id = setInterval(() => setTick((t) => t + 1), refreshEvery);
     return () => clearInterval(id);
   }, [refreshEvery]);
+
+  // Phone back online after an outage: fetch the gap once its backlog has had time to arrive.
+  useEffect(() => {
+    if (!deviceId) return;
+    let online = useData.getState().snapshots[deviceId]?.online;
+    const timers: ReturnType<typeof setTimeout>[] = [];
+    const unsubscribe = useData.subscribe((s) => {
+      const now = s.snapshots[deviceId]?.online;
+      if (now === online) return;
+      const cameBack = online === false && now === true;
+      online = now;
+      if (!cameBack) return;
+      for (const delay of BACKLOG_REFETCH_MS) timers.push(setTimeout(() => setTick((t) => t + 1), delay));
+    });
+    return () => {
+      unsubscribe();
+      for (const t of timers) clearTimeout(t);
+    };
+  }, [deviceId]);
 
   // Live appends for raw-resolution ranges.
   useEffect(() => {

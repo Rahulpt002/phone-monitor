@@ -95,6 +95,22 @@ export async function disablePush(): Promise<void> {
 }
 
 /**
+ * Sign-out: removes this browser's subscription on the Server (with the session being ended) and in
+ * the browser, so a signed-out or lost device stops showing alerts. Best effort; never prompts.
+ * Uses getRegistration() rather than `ready`, so it does not wait when no service worker runs.
+ * `token` null: the session may not call the Server (no TOTP yet), so only the browser side goes;
+ * the push service then rejects the endpoint and the Server drops it on its next send.
+ */
+export async function unsubscribePushForSignOut(token: string | null): Promise<void> {
+  if (!pushSupported()) return;
+  const reg = await navigator.serviceWorker.getRegistration();
+  const sub = await reg?.pushManager.getSubscription();
+  if (!sub) return;
+  if (token) await api.pushUnsubscribe(sub.endpoint, token).catch(() => undefined);
+  await sub.unsubscribe().catch(() => undefined);
+}
+
+/**
  * Re-registers an existing subscription after login (the Server may have lost it, or the VAPID key
  * changed after a redeploy). Silent: never prompts.
  */

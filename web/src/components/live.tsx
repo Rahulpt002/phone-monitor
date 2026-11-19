@@ -1,6 +1,7 @@
 /** Building blocks shared by the live screens. */
 import type { StoredEvent, TelemetryGroups } from '@hsm/shared';
 import { useState } from 'react';
+import { settingsChangeSummary } from '../lib/events';
 import { DASH, fmtNum, formatDateTime, formatRelative, titleCase, toMs } from '../lib/format';
 import { gradeOf, gradeTextClass, type GradedMetric } from '../lib/grades';
 import { useNow } from '../lib/hooks';
@@ -94,6 +95,7 @@ export function EventRow({ event, now }: { event: StoredEvent; now: number }) {
         </span>
       </div>
       <p className="mt-1 text-sm text-fg break-anywhere">{event.message}</p>
+      {event.kind === 'settings_changed' ? <SettingsChangeDetail data={event.data} /> : null}
       {hasData ? (
         <>
           <button type="button" className="mt-1 text-xs text-accent hover:underline" aria-expanded={open} onClick={() => setOpen((o) => !o)}>
@@ -107,6 +109,19 @@ export function EventRow({ event, now }: { event: StoredEvent; now: number }) {
         </>
       ) : null}
     </li>
+  );
+}
+
+/** Who changed which settings ('settings_changed', the Server's audit record of PUT /settings). */
+function SettingsChangeDetail({ data }: { data: StoredEvent['data'] }) {
+  const c = settingsChangeSummary(data);
+  const head = [c.user ? `by ${c.user}` : null, c.version != null ? `version ${c.version}` : null].filter(Boolean).join(' · ');
+  const line = [head, c.fields.join(', ')].filter(Boolean).join(' · ');
+  return (
+    <div className="mt-1 flex flex-wrap items-center gap-2 text-xs text-muted">
+      {line ? <span className="min-w-0 break-anywhere">{line}</span> : null}
+      {c.profileOverride ? <Badge tone="warn">Root command templates changed</Badge> : null}
+    </div>
   );
 }
 

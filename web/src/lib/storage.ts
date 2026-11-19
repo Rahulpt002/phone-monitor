@@ -36,4 +36,5 @@ export const KEYS = {
   device: 'hsm.device',
   shellHistory: 'hsm.shell_history',
   range: 'hsm.range',
+  knownDevices: 'hsm.known_devices',
 } as const;

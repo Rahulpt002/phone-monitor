@@ -1,10 +1,12 @@
 /**
  * Login session: bearer token in localStorage (no cookies, so a separately hosted Dashboard works
- * cross-origin), the signed-in user, and whether an admin still has to enrol TOTP.
+ * cross-origin), the signed-in user, and whether the user still has to enrol TOTP. Plan 10 asks
+ * for password plus TOTP for every Dashboard login, so until then the app shows only enrollment.
  */
 import type { UserInfo } from '@hsm/shared';
 import { create } from 'zustand';
 import { api, configureApi, isApiError } from '../lib/api';
+import { unsubscribePushForSignOut } from '../lib/push';
 import { KEYS, storage } from '../lib/storage';
 
 export type SessionPhase = 'anonymous' | 'ready';
@@ -25,6 +27,24 @@ interface SessionState {
 const savedToken = storage.get(KEYS.token);
 const savedUser = storage.getJson<UserInfo>(KEYS.user);
 
+/** Every role needs TOTP (plan 10); the Server's MeResponse.totp_enrollment_required has the final say. */
+const needsEnrollment = (u: UserInfo | null | undefined) => Boolean(u && !u.totp_enabled);
+
+/**
+ * Ends the session on the Server in the background, with the token the app has already dropped:
+ * first this browser's push subscription (so a signed-out or lost device stops showing alerts,
+ * F04), then the session itself. Both best effort.
+ */
+async function endSessionOnServer(token: string, enrolled: boolean): Promise<void> {
+  try {
+    // A session without TOTP may not call /push/unsubscribe (it answers 403); the browser side still goes.
+    await unsubscribePushForSignOut(enrolled ? token : null);
+  } catch {
+    /* best effort */
+  }
+  await api.logout(token).catch(() => undefined);
+}
+
 type LogoutListener = () => void;
 const logoutListeners = new Set<LogoutListener>();
 /** Lets the socket and data stores reset themselves without a circular import. */
@@ -36,7 +56,7 @@ export function onLogout(fn: LogoutListener): () => void {
 export const useSession = create<SessionState>()((set, get) => ({
   token: savedToken,
   user: savedToken ? savedUser : null,
-  totpEnrollmentRequired: Boolean(savedUser && savedUser.role === 'admin' && !savedUser.totp_enabled),
+  totpEnrollmentRequired: Boolean(savedToken) && needsEnrollment(savedUser),
   phase: savedToken && savedUser ? 'ready' : 'anonymous',
   notice: null,
 
@@ -48,7 +68,7 @@ export const useSession = create<SessionState>()((set, get) => ({
       user,
       phase: 'ready',
       notice: null,
-      totpEnrollmentRequired: user.role === 'admin' && !user.totp_enabled,
+      totpEnrollmentRequired: needsEnrollment(user),
     });
     await get().refreshMe();
   },
@@ -68,7 +88,7 @@ export const useSession = create<SessionState>()((set, get) => ({
 
   logout: (notice = null, callServer = true) => {
     const token = get().token;
-    if (callServer && token) void api.logout().catch(() => undefined);
+    if (callServer && token) void endSessionOnServer(token, !get().totpEnrollmentRequired);
     storage.set(KEYS.token, null);
     storage.set(KEYS.user, null);
     set({ token: null, user: null, phase: 'anonymous', notice, totpEnrollmentRequired: false });
@@ -83,8 +103,11 @@ configureApi({
   onUnauthorized: () => {
     if (useSession.getState().token) useSession.getState().logout('Your session has expired. Please sign in again.', false);
   },
+  onTotpEnrollmentRequired: () => {
+    if (useSession.getState().token) useSession.getState().setTotpEnrollmentRequired(true);
+  },
 });
 
 export const selectIsAdmin = (s: SessionState) => s.user?.role === 'admin';
-/** Admin who may actually send commands and change settings right now. */
+/** Admin who may actually send commands and change settings right now (enrolled in TOTP). */
 export const selectCanControl = (s: SessionState) => s.user?.role === 'admin' && !s.totpEnrollmentRequired;

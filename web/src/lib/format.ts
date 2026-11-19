@@ -71,10 +71,23 @@ export function formatDuration(seconds: Num): string {
   return s > 0 ? `${m} min ${s} s` : `${m} min`;
 }
 
+const DATE_ONLY = /^(\d{4})-(\d{2})-(\d{2})$/;
+
+/**
+ * Milliseconds for a timestamp. A date-only string (the Agent's LocalDate, e.g. traffic.cycle_start
+ * "2026-11-01") is that calendar day at local midnight: Date.parse would read it as UTC midnight,
+ * which shows as the day before west of UTC.
+ */
 export function toMs(t: string | number | Date | null | undefined): number | null {
   if (t == null) return null;
   if (typeof t === 'number') return Number.isFinite(t) ? t : null;
   if (t instanceof Date) return t.getTime();
+  const day = DATE_ONLY.exec(t);
+  if (day) {
+    const [y, m, d] = [Number(day[1]), Number(day[2]), Number(day[3])];
+    const local = new Date(y, m - 1, d);
+    return local.getFullYear() === y && local.getMonth() === m - 1 && local.getDate() === d ? local.getTime() : null;
+  }
   const ms = Date.parse(t);
   return Number.isNaN(ms) ? null : ms;
 }

@@ -5,7 +5,7 @@ import { useData } from '../../store/data';
 import { useSession } from '../../store/session';
 import { CommandRunnerProvider } from '../commands/CommandRunner';
 import { Button, Loading, Notice } from '../ui/primitives';
-import { ConnectionBanner, TotpBanner } from './Banners';
+import { ConnectionBanner } from './Banners';
 import { BottomTabs, SideNav } from './Navigation';
 import { NoPhonePaired, usableWithoutPhone } from './NoPhone';
 import { ScreenBoundary } from './RouteBoundary';
@@ -14,11 +14,13 @@ import { useDataLoader } from './useDataLoader';
 
 export function AppShell() {
   const token = useSession((s) => s.token);
+  // App.tsx only renders the shell once TOTP is enrolled; this keeps the socket shut regardless.
+  const enroll = useSession((s) => s.totpEnrollmentRequired);
   const loader = useDataLoader();
 
   useEffect(() => {
-    if (token) startSocket(token);
-  }, [token]);
+    if (token && !enroll) startSocket(token);
+  }, [token, enroll]);
 
   return (
     <CommandRunnerProvider>
@@ -32,7 +34,6 @@ export function AppShell() {
       <div className="min-h-dvh lg:pl-60">
         <TopBar />
         <ConnectionBanner />
-        <TotpBanner />
         <main id="main" tabIndex={-1} className="mx-auto max-w-6xl px-4 pb-28 pt-4 outline-none lg:pb-12">
           {loader.error ? (
             <div className="mb-4">

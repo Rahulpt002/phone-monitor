@@ -8,6 +8,7 @@ import {
   formatBps,
   formatBytes,
   formatCurrent,
+  formatDate,
   formatDuration,
   formatNetType,
   formatPercent,
@@ -159,7 +160,7 @@ export function OverviewScreen() {
               <Progress value={usedPct} label="Data used this cycle" tone={usedPct >= 100 ? 'danger' : usedPct >= 80 ? 'warn' : 'info'} />
             </div>
           ) : null}
-          <p className="mt-3 text-sm text-muted">Today {formatBytes(todayUsed)}{traffic?.cycle_start ? ` · cycle started ${traffic.cycle_start}` : ''}</p>
+          <p className="mt-3 text-sm text-muted">Today {formatBytes(todayUsed)}{traffic?.cycle_start ? ` · cycle started ${formatDate(traffic.cycle_start)}` : ''}</p>
         </Card>
 
         <Card title="Uptime">

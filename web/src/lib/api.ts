@@ -9,6 +9,7 @@ import type {
   CommandRecord,
   CommandsResponse,
   CreateUserRequest,
+  DeleteUserRequest,
   DeviceSnapshot,
   DeviceSummary,
   EventKind,
@@ -18,15 +19,15 @@ import type {
   MeResponse,
   PairCodeResponse,
   PublicConfig,
-  Role,
+  PutSettingsRequest,
   SendCommandRequest,
   SessionResponse,
-  Settings,
   SettingsResponse,
   SmsResponse,
   StoredEvent,
   TelemetryHistoryResponse,
   TotpSetupResponse,
+  UpdateUserRequest,
   UserInfo,
 } from '@hsm/shared';
 import { API_BASE } from './config';
@@ -63,6 +64,8 @@ interface ApiConfig {
   base: string;
   getToken: () => string | null;
   onUnauthorized: () => void;
+  /** The session has no TOTP yet: the Server refuses everything but enrollment (plan 10). */
+  onTotpEnrollmentRequired: () => void;
   fetchImpl: typeof fetch;
   /** Render's free tier can take close to a minute to wake up, so the default is generous. */
   timeoutMs: number;
@@ -72,6 +75,7 @@ const config: ApiConfig = {
   base: API_BASE,
   getToken: () => null,
   onUnauthorized: () => {},
+  onTotpEnrollmentRequired: () => {},
   fetchImpl: (...args) => globalThis.fetch(...args),
   timeoutMs: 70_000,
 };
@@ -88,6 +92,8 @@ export interface RequestOptions {
   signal?: AbortSignal;
   /** Send the session token (default true). Public endpoints pass false. */
   auth?: boolean;
+  /** Use this session token instead of the current one (sign-out finishes after the app dropped it). */
+  token?: string;
   timeoutMs?: number;
 }
 
@@ -129,7 +135,7 @@ export async function request<T>(method: string, path: string, opts: RequestOpti
   const useAuth = opts.auth !== false;
   const headers: Record<string, string> = { Accept: 'application/json' };
   if (opts.body !== undefined) headers['Content-Type'] = 'application/json';
-  const token = useAuth ? config.getToken() : null;
+  const token = useAuth ? (opts.token ?? config.getToken()) : null;
   if (token) headers.Authorization = `Bearer ${token}`;
 
   const controller = new AbortController();
@@ -182,8 +188,11 @@ export async function request<T>(method: string, path: string, opts: RequestOpti
       typeof body.message === 'string' && body.message
         ? body.message
         : (DEFAULT_MESSAGES[code] ?? `Request failed (HTTP ${res.status}).`);
+    // Only answers about the current session change it (not a sign-out finishing in the background).
+    const current = useAuth && token && opts.token === undefined;
     // A wrong password on a re-auth action is also a 401, but it must not end the session.
-    if (res.status === 401 && useAuth && token && code === 'unauthorized') config.onUnauthorized();
+    if (current && res.status === 401 && code === 'unauthorized') config.onUnauthorized();
+    if (current && res.status === 403 && code === 'totp_enrollment_required') config.onTotpEnrollmentRequired();
     throw new ApiRequestError(res.status, code, message);
   }
 
@@ -208,10 +217,11 @@ export interface HistoryQuery {
 export const api = {
   // auth
   login: (body: LoginRequest) => request<LoginResponse>('POST', '/auth/login', { body, auth: false }),
-  totpLogin: (pending_token: string, code: string) =>
-    request<SessionResponse>('POST', '/auth/totp', { body: { pending_token, code }, auth: false }),
+  totpLogin: (pending_token: string, code: string, device_token?: string) =>
+    request<SessionResponse>('POST', '/auth/totp', { body: { pending_token, code, device_token }, auth: false }),
   me: (signal?: AbortSignal) => get<MeResponse>('/auth/me', undefined, signal),
-  logout: () => request<void>('POST', '/auth/logout', { timeoutMs: 5000 }),
+  /** `token`: the session to end (sign-out drops it from the app before this call finishes). */
+  logout: (token?: string) => request<void>('POST', '/auth/logout', { timeoutMs: 5000, token }),
   totpSetup: () => send<TotpSetupResponse>('POST', '/auth/totp/setup'),
   totpEnable: (code: string) => send<{ ok: true }>('POST', '/auth/totp/enable', { code }),
   totpDisable: (password: string, code: string) => send<{ ok: true }>('POST', '/auth/totp/disable', { password, code }),
@@ -219,10 +229,11 @@ export const api = {
 
   // users
   users: () => get<UserInfo[]>('/users'),
+  // Every user change carries `reauth_password`, the acting admin's own password (401 reauth_required).
   createUser: (body: CreateUserRequest) => send<UserInfo>('POST', '/users', body),
-  /** `reset_totp: true` clears that user's authenticator and revokes their sessions (lost phone). */
-  updateUser: (id: number, patch: { role?: Role; password?: string; reset_totp?: true }) => send<UserInfo>('PATCH', `/users/${id}`, patch),
-  deleteUser: (id: number) => send<void>('DELETE', `/users/${id}`),
+  /** `reset_totp: true` clears that user's authenticator, revokes their sessions and push subscriptions (lost phone). */
+  updateUser: (id: number, patch: UpdateUserRequest) => send<UserInfo>('PATCH', `/users/${id}`, patch),
+  deleteUser: (id: number, body: DeleteUserRequest) => send<void>('DELETE', `/users/${id}`, body),
 
   // pairing and devices
   createPairCode: (name?: string) => send<PairCodeResponse>('POST', '/pair/codes', name ? { name } : {}),
@@ -249,8 +260,8 @@ export const api = {
 
   // settings
   settings: (device_id: string, signal?: AbortSignal) => get<SettingsResponse>('/settings', { device_id }, signal),
-  putSettings: (device_id: string, patch: Partial<Settings> | Record<string, unknown>) =>
-    send<SettingsResponse>('PUT', '/settings', { device_id, settings: patch }),
+  /** A change to profile_override needs `password` (the admin's own; 401 reauth_required). */
+  putSettings: (body: PutSettingsRequest) => send<SettingsResponse>('PUT', '/settings', body),
 
   // finder
   spots: (device_id: string, signal?: AbortSignal) => get<FinderSpotsResponse>('/finder/spots', { device_id }, signal),
@@ -261,7 +272,8 @@ export const api = {
   testAlert: () => send<AlertRecord>('POST', '/alerts/test'),
   vapid: () => get<{ public_key: string }>('/push/vapid'),
   pushSubscribe: (subscription: PushSubscriptionJSON) => send<void>('POST', '/push/subscribe', { subscription }),
-  pushUnsubscribe: (endpoint: string) => send<void>('POST', '/push/unsubscribe', { endpoint }),
+  pushUnsubscribe: (endpoint: string, token?: string) =>
+    request<void>('POST', '/push/unsubscribe', { body: { endpoint }, token, timeoutMs: token ? 5000 : undefined }),
 
   // messages
   sms: (q: { device_id?: string | null; limit?: number }, signal?: AbortSignal) => get<SmsResponse>('/sms', q, signal),

@@ -5,11 +5,16 @@ import { useDeviceSettings } from '../store/selectors';
 import { useHistory } from './charts/useHistory';
 import { Notice } from './ui/primitives';
 
-/** Plugged in, battery current negative, and charging is supposed to be happening (not paused by the limit). */
+/**
+ * Plugged in, battery current negative, and charging is supposed to be happening. A pause the
+ * Agent made on purpose (charge limit, heat, manual) is not a weak supply, even when the switch
+ * suspends input and the battery reports "discharging" (docs/phase0.md, input suspend); the Agent's
+ * WeakPowerDetector ignores that state the same way.
+ */
 export function isPluggedButDraining(p: PowerInfo | undefined | null): boolean {
   if (!p || !p.plug || p.plug === 'none' || p.current_ma == null || p.current_ma >= 0) return false;
-  if (p.status === 'discharging') return true;
-  return p.charging_enabled !== false && p.stop_reason == null && p.status !== 'full';
+  if (p.charging_enabled === false || p.stop_reason != null) return false;
+  return p.status !== 'full';
 }
 
 function DrainingNotice({ power }: { power: PowerInfo }) {

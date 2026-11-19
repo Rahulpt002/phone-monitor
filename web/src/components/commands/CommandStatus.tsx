@@ -4,7 +4,6 @@ import { api, errorMessage } from '../../lib/api';
 import { STATUS_META, describeCommand, revertExplanation } from '../../lib/commandMeta';
 import { formatCountdown, formatDateTime, formatRelative, toMs } from '../../lib/format';
 import { useNow } from '../../lib/hooks';
-import { useData } from '../../store/data';
 import { useCanControl } from '../../store/selectors';
 import { toast } from '../../store/toasts';
 import { Badge, Button, cx } from '../ui/primitives';
@@ -63,8 +62,9 @@ export function RevertCountdown({ cmd }: { cmd: CommandRecord }) {
   const keep = async () => {
     setBusy(true);
     try {
-      const rec = await api.keepCommand(cmd.id);
-      if (rec?.id) useData.getState().mergeCommands([rec]);
+      // The response is the record as it was (still revert_armed); 'kept' arrives over the socket
+      // once the Agent confirms, so there is nothing to merge here.
+      await api.keepCommand(cmd.id);
       toast.success(`Kept: ${describeCommand(cmd.name, cmd.args)}`);
     } catch (e) {
       toast.error(`Keep failed: ${errorMessage(e)}`);

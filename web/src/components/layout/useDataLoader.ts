@@ -21,7 +21,8 @@ export interface LoaderState {
 }
 
 export function useDataLoader(): LoaderState {
-  const token = useSession((s) => s.token);
+  // Nothing loads for a session that still has to enrol TOTP (the Server would answer 403).
+  const token = useSession((s) => (s.totpEnrollmentRequired ? null : s.token));
   const isAdmin = useSession((s) => s.user?.role === 'admin');
   const epoch = useConn((s) => s.epoch);
   const deviceId = useUi((s) => s.deviceId);

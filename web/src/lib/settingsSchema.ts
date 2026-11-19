@@ -67,6 +67,7 @@ export const SETTINGS_SECTIONS: SectionDef[] = [
         path: 'watchdog.usb_function',
         label: 'USB tethering function',
         kind: 'select',
+        help: 'Fallback only: the device profile (and its override) wins, and the watchdog re-enables the function last seen with tethering up.',
         options: [
           { value: 'rndis', label: 'RNDIS (Windows, most routers)' },
           { value: 'ncm', label: 'NCM (macOS, Linux, newer routers)' },

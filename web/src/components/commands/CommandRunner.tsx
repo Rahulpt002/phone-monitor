@@ -5,7 +5,6 @@
  */
 import { COMMANDS, type CommandName, type CommandRecord } from '@hsm/shared';
 import { createContext, useCallback, useContext, useMemo, useRef, useState, type ReactNode } from 'react';
-import { useNavigate } from 'react-router-dom';
 import { api, errorMessage, isApiError } from '../../lib/api';
 import { COMMAND_HELP, DESTRUCTIVE, describeCommand, revertExplanation } from '../../lib/commandMeta';
 import { useData } from '../../store/data';
@@ -45,7 +44,6 @@ interface Pending {
 }
 
 export function CommandRunnerProvider({ children }: { children: ReactNode }) {
-  const navigate = useNavigate();
   const [pending, setPending] = useState<Pending | null>(null);
   const [password, setPassword] = useState('');
   const [error, setError] = useState<string | null>(null);
@@ -78,17 +76,14 @@ export function CommandRunnerProvider({ children }: { children: ReactNode }) {
 
   const handleError = useCallback(
     (e: unknown): string => {
-      if (isApiError(e, 'totp_enrollment_required')) {
-        useSession.getState().setTotpEnrollmentRequired(true);
-        navigate('/settings?tab=account');
-        return 'Set up two-factor authentication first (Settings > My account).';
-      }
+      // The API client already switched the app to the enrollment page (plan 10).
+      if (isApiError(e, 'totp_enrollment_required')) return 'Set up two-factor authentication first.';
       if (isApiError(e, 'reauth_required')) return 'Wrong password. Try again.';
       if (isApiError(e, 'forbidden')) return 'Your account is not allowed to send this command.';
       if (isApiError(e, 'device_offline')) return 'The phone is offline. The command is queued until it expires.';
       return errorMessage(e);
     },
-    [navigate],
+    [],
   );
 
   const run: Run = useCallback(
@@ -105,7 +100,6 @@ export function CommandRunnerProvider({ children }: { children: ReactNode }) {
       }
       if (session.totpEnrollmentRequired) {
         toast.warning('Set up two-factor authentication before using controls.');
-        navigate('/settings?tab=account');
         return null;
       }
       if (spec.confirm || spec.reauth) {
@@ -122,7 +116,7 @@ export function CommandRunnerProvider({ children }: { children: ReactNode }) {
         return null;
       }
     },
-    [navigate, submit, handleError],
+    [submit, handleError],
   );
 
   const close = () => {

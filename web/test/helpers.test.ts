@@ -65,6 +65,14 @@ describe('plugged in but discharging', () => {
     expect(isPluggedButDraining(base)).toBe(true);
     expect(isPluggedButDraining({ ...base, status: 'charging', stop_reason: null })).toBe(true);
   });
+  it('ignores an intentional pause on input-suspend switches, which report "discharging" (F10)', () => {
+    // Qualcomm input_suspend / Samsung batt_slate_mode at the 60 % limit: the phone runs from the battery.
+    expect(isPluggedButDraining({ plug: 'usb', status: 'discharging', current_ma: -300, charging_enabled: false, stop_reason: 'limit' })).toBe(false);
+    expect(isPluggedButDraining({ ...base, stop_reason: 'heat' })).toBe(false);
+    expect(isPluggedButDraining({ ...base, charging_enabled: false })).toBe(false);
+    // Charging is supposed to be on: still a warning.
+    expect(isPluggedButDraining({ ...base, stop_reason: null })).toBe(true);
+  });
   it('ignores the normal pause at the charge limit and unplugged phones', () => {
     expect(isPluggedButDraining(slow.power as PowerInfo)).toBe(false);
     expect(isPluggedButDraining({ ...base, plug: 'none' })).toBe(false);

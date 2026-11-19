@@ -13,6 +13,7 @@ function jsonResponse(status: number, body: unknown): Response {
 
 let calls: FetchArgs[];
 let onUnauthorized: ReturnType<typeof vi.fn<() => void>>;
+let onTotpEnrollmentRequired: ReturnType<typeof vi.fn<() => void>>;
 let token: string | null;
 
 function useFetch(impl: (url: string, init: RequestInit) => Promise<Response>) {
@@ -28,7 +29,8 @@ beforeEach(() => {
   calls = [];
   token = 'sess_123';
   onUnauthorized = vi.fn<() => void>();
-  configureApi({ base: 'https://hsm.example.com', getToken: () => token, onUnauthorized, timeoutMs: 1000 });
+  onTotpEnrollmentRequired = vi.fn<() => void>();
+  configureApi({ base: 'https://hsm.example.com', getToken: () => token, onUnauthorized, onTotpEnrollmentRequired, timeoutMs: 1000 });
 });
 
 afterEach(() => {
@@ -56,7 +58,9 @@ describe('request', () => {
 
   it('returns undefined for 204 No Content', async () => {
     useFetch(async () => new Response(null, { status: 204 }));
-    await expect(api.deleteUser(3)).resolves.toBeUndefined();
+    await expect(api.deleteUser(3, { reauth_password: 'pw' })).resolves.toBeUndefined();
+    expect(calls[0]![1].method).toBe('DELETE');
+    expect(JSON.parse(calls[0]![1].body as string)).toEqual({ reauth_password: 'pw' });
   });
 
   it('maps a 401 unauthorized to a logout', async () => {
@@ -85,11 +89,21 @@ describe('request', () => {
 
   it('keeps the server error code and message', async () => {
     useFetch(async () => jsonResponse(403, { error: 'totp_enrollment_required', message: 'enable TOTP first' }));
-    await expect(api.putSettings('d_1', { plan: { quota_gb: 5 } })).rejects.toMatchObject({
+    await expect(api.putSettings({ device_id: 'd_1', settings: { plan: { quota_gb: 5 } } })).rejects.toMatchObject({
       status: 403,
       code: 'totp_enrollment_required',
       message: 'enable TOTP first',
     });
+    // The session needs TOTP enrollment (plan 10): the app switches to the setup page, no sign-out.
+    expect(onTotpEnrollmentRequired).toHaveBeenCalledTimes(1);
+    expect(onUnauthorized).not.toHaveBeenCalled();
+  });
+
+  it('sends an explicit session token, and its answers do not touch the current session', async () => {
+    useFetch(async () => jsonResponse(401, { error: 'unauthorized', message: 'session expired' }));
+    await expect(api.logout('sess_old')).rejects.toMatchObject({ code: 'unauthorized' });
+    expect((calls[0]![1].headers as Record<string, string>).Authorization).toBe('Bearer sess_old');
+    expect(onUnauthorized).not.toHaveBeenCalled();
   });
 
   it('falls back to the HTTP status when the body is not JSON', async () => {

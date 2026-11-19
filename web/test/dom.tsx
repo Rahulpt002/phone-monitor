@@ -39,6 +39,22 @@ export async function flush(times = 3): Promise<void> {
   }
 }
 
+/** Flushes until `check` passes (lazy chunks load asynchronously), or throws its last error. */
+export async function waitFor(check: () => void, timeoutMs = 3000): Promise<void> {
+  const until = Date.now() + timeoutMs;
+  for (;;) {
+    try {
+      check();
+      return;
+    } catch (e) {
+      if (Date.now() > until) throw e;
+      await act(async () => {
+        await new Promise((r) => setTimeout(r, 10));
+      });
+    }
+  }
+}
+
 export async function click(el: Element | null | undefined): Promise<void> {
   if (!el) throw new Error('click: element not found');
   await act(async () => {
@@ -69,6 +85,8 @@ export interface FetchCall {
   method: string;
   path: string;
   body: unknown;
+  /** The Authorization header (not enumerable, so toEqual on calls ignores it). */
+  readonly auth?: string | null;
 }
 
 type MockResponse = { status: number; body?: unknown } | undefined;
@@ -87,6 +105,8 @@ export function mockApi(route: Route): FetchCall[] {
         path: u.pathname.replace(/^\/api/, '') + u.search,
         body: typeof init.body === 'string' ? JSON.parse(init.body) : undefined,
       };
+      const headers = (init.headers ?? {}) as Record<string, string>;
+      Object.defineProperty(call, 'auth', { value: headers.Authorization ?? null, enumerable: false });
       calls.push(call);
       const res = (await route(call)) ?? { status: 404, body: { error: 'not_found', message: `No mock for ${call.method} ${call.path}` } };
       return new Response(res.body === undefined ? null : JSON.stringify(res.body), {
@@ -96,4 +116,45 @@ export function mockApi(route: Route): FetchCall[] {
     }) as typeof fetch,
   });
   return calls;
+}
+
+/** Stand-in for the browser WebSocket: records instances and lets a test play the Server. */
+export class FakeWebSocket {
+  static readonly CONNECTING = 0;
+  static readonly OPEN = 1;
+  static readonly CLOSING = 2;
+  static readonly CLOSED = 3;
+  static instances: FakeWebSocket[] = [];
+  readonly url: string;
+  readyState = FakeWebSocket.CONNECTING;
+  sent: unknown[] = [];
+  onopen: ((ev: unknown) => void) | null = null;
+  onmessage: ((ev: { data: string }) => void) | null = null;
+  onclose: ((ev: { code: number; reason: string }) => void) | null = null;
+  onerror: ((ev: unknown) => void) | null = null;
+  constructor(url: string) {
+    this.url = url;
+    FakeWebSocket.instances.push(this);
+  }
+  static latest(): FakeWebSocket | undefined {
+    return FakeWebSocket.instances[FakeWebSocket.instances.length - 1];
+  }
+  send(data: string): void {
+    this.sent.push(JSON.parse(data));
+  }
+  /** Closed by the client: no event (the client detaches its handlers first). */
+  close(): void {
+    this.readyState = FakeWebSocket.CLOSED;
+  }
+  serverOpen(): void {
+    this.readyState = FakeWebSocket.OPEN;
+    this.onopen?.({});
+  }
+  serverSend(msg: unknown): void {
+    this.onmessage?.({ data: JSON.stringify(msg) });
+  }
+  serverClose(code: number, reason = ''): void {
+    this.readyState = FakeWebSocket.CLOSED;
+    this.onclose?.({ code, reason });
+  }
 }

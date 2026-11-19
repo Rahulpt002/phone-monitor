@@ -103,7 +103,6 @@ function DisableTotp() {
   const [code, setCode] = useState('');
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const isAdmin = useIsAdmin();
   return (
     <form
       className="grid max-w-md grid-cols-1 gap-3"
@@ -114,8 +113,9 @@ function DisableTotp() {
         setError(null);
         try {
           await api.totpDisable(password, code.trim());
+          // The session now needs enrollment again: the app switches to the setup page.
           await useSession.getState().refreshMe();
-          toast.success('Two-factor authentication is off.');
+          toast.success('Two-factor authentication is off. Set up your new authenticator now.');
         } catch (err) {
           setError(errorMessage(err));
         } finally {
@@ -123,7 +123,10 @@ function DisableTotp() {
         }
       }}
     >
-      {isAdmin ? <Notice tone="warn">Admins without two-factor authentication cannot use controls or change settings.</Notice> : null}
+      <Notice tone="warn">
+        Every account needs two-factor authentication (plan 10). Turning it off takes you straight to setting it up again, for example
+        with an authenticator on a new phone.
+      </Notice>
       <Field label="Password">
         {({ id }) => <TextInput id={id} type="password" autoComplete="current-password" value={password} onChange={(e) => setPassword(e.target.value)} />}
       </Field>
@@ -133,7 +136,7 @@ function DisableTotp() {
       {error ? <Notice tone="danger">{error}</Notice> : null}
       <div>
         <Button type="submit" variant="danger" busy={busy}>
-          Turn off two-factor
+          Turn off and set up again
         </Button>
       </div>
     </form>
@@ -165,7 +168,7 @@ function AccountTab() {
               <DisableTotp />
             ) : (
               <Button size="sm" variant="ghost" onClick={() => setShowDisable(true)}>
-                Turn off…
+                Move to a new authenticator…
               </Button>
             )}
           </div>

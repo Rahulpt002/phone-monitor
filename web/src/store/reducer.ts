@@ -2,19 +2,21 @@
  * Pure state transitions for everything the Dashboard socket and the REST loaders deliver
  * (docs/protocol.md section 5). Kept free of React and zustand so tests can feed it fixtures.
  */
-import type {
-  AlertRecord,
-  CommandRecord,
-  DeviceSnapshot,
-  DeviceSummary,
-  FinderLive,
-  FinderSpot,
-  Settings,
-  SmsRecord,
-  StoredEvent,
-  TelemetryGroups,
-  TelemetryTier,
+import {
+  commandMayMove,
+  type AlertRecord,
+  type CommandRecord,
+  type DeviceSnapshot,
+  type DeviceSummary,
+  type FinderLive,
+  type FinderSpot,
+  type Settings,
+  type SmsRecord,
+  type StoredEvent,
+  type TelemetryGroups,
+  type TelemetryTier,
 } from '@hsm/shared';
+import { withoutSecretArgs } from '../lib/commandMeta';
 
 export type DeviceSms = SmsRecord & { device_id: string };
 
@@ -74,16 +76,51 @@ const ms = (iso: string | null | undefined): number => {
   return Number.isNaN(v) ? Number.NEGATIVE_INFINITY : v;
 };
 
+const isObj = (v: unknown): v is Record<string, unknown> => typeof v === 'object' && v !== null && !Array.isArray(v);
+
 const laterIso = (a: string | null | undefined, b: string | null | undefined): string | null =>
   ms(a) >= ms(b) ? (a ?? b ?? null) : (b ?? null);
 
-/** Upsert by key, keep newest first by `time`, cap the length. */
-export function mergeById<T>(list: T[], incoming: T[], key: (x: T) => string, time: (x: T) => string, cap: number): T[] {
+/**
+ * Upsert by key, keep newest first by `time`, cap the length. `replaces(current, incoming)` decides
+ * whether an incoming record may replace the stored one (default: always).
+ */
+export function mergeById<T>(
+  list: T[],
+  incoming: T[],
+  key: (x: T) => string,
+  time: (x: T) => string,
+  cap: number,
+  replaces?: (current: T, incoming: T) => boolean,
+): T[] {
   if (!incoming.length) return list;
   const map = new Map<string, T>();
   for (const x of list) map.set(key(x), x);
-  for (const x of incoming) map.set(key(x), x);
+  for (const x of incoming) {
+    const cur = map.get(key(x));
+    if (cur === undefined || !replaces || replaces(cur, x)) map.set(key(x), x);
+  }
   return [...map.values()].sort((a, b) => ms(time(b)) - ms(time(a))).slice(0, cap);
+}
+
+/**
+ * A command record is mutable: an older copy (a late REST response, a delayed broadcast) must not
+ * undo a newer status. Uses the Server's own lifecycle table (shared commandMayMove), so a soft
+ * 'expired' replaces 'sent', 'acked' and 'revert_armed', and late reports after it still apply.
+ * A copy with the same status may refresh the record (re-delivery, output).
+ */
+const commandNotBehind = (cur: CommandRecord, next: CommandRecord) =>
+  next.status === cur.status || commandMayMove(cur, next.status);
+
+/** Secret arguments (CommandSpec.secret_args, the hotspot password) never enter the store. */
+function sanitizeCommand(c: CommandRecord): CommandRecord {
+  if (!isObj(c.args)) return c;
+  const args = withoutSecretArgs(c.name, c.args);
+  return args === c.args ? c : { ...c, args };
+}
+
+function mergeCommandList(list: CommandRecord[], incoming: CommandRecord[]): CommandRecord[] {
+  return mergeById(list, incoming.map(sanitizeCommand), (c) => c.id, (c) => c.created_at, CAPS.commands, commandNotBehind);
 }
 
 export function emptySnapshot(device_id: string): DeviceSnapshot {
@@ -167,8 +204,6 @@ function upsertSpot(spots: FinderSpot[], spot: FinderSpot): FinderSpot[] {
   return [...normalized, spot];
 }
 
-const isObj = (v: unknown): v is Record<string, unknown> => typeof v === 'object' && v !== null && !Array.isArray(v);
-
 /**
  * Applies one Server -> Dashboard message. Unknown `t` values and malformed messages are ignored
  * (protocol rule: receivers ignore what they do not understand).
@@ -186,7 +221,7 @@ export function applyServerMessage(state: DataState, raw: unknown, now: number =
         ...device,
         state: device.state ?? {},
         state_ts: device.state_ts ?? {},
-        pending_reverts: Array.isArray(device.pending_reverts) ? device.pending_reverts : [],
+        pending_reverts: Array.isArray(device.pending_reverts) ? device.pending_reverts.map(sanitizeCommand) : [],
       };
       let spots = state.spots;
       if (snap.baseline) {
@@ -197,7 +232,7 @@ export function applyServerMessage(state: DataState, raw: unknown, now: number =
         ...state,
         snapshots: { ...state.snapshots, [snap.device_id]: snap },
         devices: upsertSummary(state.devices, summaryOf(snap)),
-        commands: mergeById(state.commands, snap.pending_reverts, (c) => c.id, (c) => c.created_at, CAPS.commands),
+        commands: mergeCommandList(state.commands, snap.pending_reverts),
         spots,
       };
     }
@@ -245,11 +280,14 @@ export function applyServerMessage(state: DataState, raw: unknown, now: number =
     case 'command': {
       const cmd = msg.command as CommandRecord | undefined;
       if (!isObj(cmd) || typeof cmd.id !== 'string') return state;
+      const commands = mergeCommandList(state.commands, [cmd]);
+      // The record now stored: a delayed older status does not re-arm a finished revert.
+      const current = commands.find((c) => c.id === cmd.id) ?? sanitizeCommand(cmd);
       const snap = state.snapshots[cmd.device_id];
       return {
         ...state,
-        commands: mergeById(state.commands, [cmd], (c) => c.id, (c) => c.created_at, CAPS.commands),
-        snapshots: snap ? { ...state.snapshots, [cmd.device_id]: withPendingRevert(snap, cmd) } : state.snapshots,
+        commands,
+        snapshots: snap ? { ...state.snapshots, [cmd.device_id]: withPendingRevert(snap, current) } : state.snapshots,
       };
     }
 
@@ -327,6 +365,13 @@ export function setDevices(state: DataState, devices: DeviceSummary[]): DataStat
   return { ...state, devices, snapshots };
 }
 
+/**
+ * When the connection state in a snapshot last changed: the start of the connection while online,
+ * the last contact (about when it dropped) while offline.
+ */
+const linkChangedAt = (s: Pick<DeviceSnapshot, 'online' | 'connected_since' | 'last_seen'>): number =>
+  s.online ? ms(s.connected_since) : ms(s.last_seen);
+
 export function setSnapshot(state: DataState, snap: DeviceSnapshot): DataState {
   const cur = state.snapshots[snap.device_id];
   // Keep any group the socket delivered after this REST response was produced.
@@ -340,7 +385,9 @@ export function setSnapshot(state: DataState, snap: DeviceSnapshot): DataState {
         ts2[key] = cur.state_ts[key];
       }
     }
-    merged = { ...snap, state: state2, state_ts: ts2, last_seen: laterIso(snap.last_seen, cur.last_seen) };
+    // Same for the online state: a live `status` newer than this response wins.
+    const link = linkChangedAt(cur) > linkChangedAt(snap) ? { online: cur.online, connected_since: cur.connected_since } : {};
+    merged = { ...snap, ...link, state: state2, state_ts: ts2, last_seen: laterIso(snap.last_seen, cur.last_seen) };
   }
   return applyServerMessage(
     { ...state, snapshots: { ...state.snapshots, [snap.device_id]: merged } },
@@ -349,7 +396,7 @@ export function setSnapshot(state: DataState, snap: DeviceSnapshot): DataState {
 }
 
 export function mergeCommands(state: DataState, list: CommandRecord[]): DataState {
-  return { ...state, commands: mergeById(state.commands, list, (c) => c.id, (c) => c.created_at, CAPS.commands) };
+  return { ...state, commands: mergeCommandList(state.commands, list) };
 }
 
 export function mergeEvents(state: DataState, list: StoredEvent[]): DataState {

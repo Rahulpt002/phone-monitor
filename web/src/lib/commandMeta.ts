@@ -17,7 +17,7 @@ export const COMMAND_HELP: Partial<Record<CommandName, string>> = {
   screen: 'Wakes the screen or puts it to sleep.',
   brightness: 'Screen brightness, 0 to 255. Keep it low to save power and heat.',
   charging: 'Manual charge switch. The watchdog heat rule still wins.',
-  charge_limit: 'Stop charging at this level; resumes a few percent lower. Also saved in Settings.',
+  charge_limit: 'Stop charging at this level; resumes a few percent lower. Saved in Settings once the phone reports it applied.',
   app_list: 'Lists installed apps (shown under System > Apps).',
   app_force_stop: 'Stops an app until it is started again.',
   app_disable: 'Disables an app for user 0 until it is enabled again.',
@@ -69,9 +69,40 @@ export function hasResult(c: CommandRecord | undefined): boolean {
 
 const onOff = (v: unknown) => (v === true ? 'on' : v === false ? 'off' : String(v));
 
-/** One-line human description of a command with its arguments. */
-export function describeCommand(name: CommandName, args: Record<string, unknown> = {}): string {
+/**
+ * `args` without the keys the command declares secret (CommandSpec.secret_args, e.g. the hotspot
+ * password). The Server never sends them; this keeps them out of the store and the UI regardless.
+ */
+export function withoutSecretArgs(name: CommandName, args: Record<string, unknown>): Record<string, unknown> {
+  const secret = COMMANDS[name]?.secret_args;
+  if (!secret?.length || !args || !secret.some((k) => k in args)) return args;
+  const out = { ...args };
+  for (const k of secret) delete out[k];
+  return out;
+}
+
+/** WPA2 passphrase as the Agent accepts it (ArgRules.kt): 8 to 63 printable ASCII characters. */
+export function hotspotPasswordError(pw: string): string | null {
+  if (pw.length < 8) return 'At least 8 characters (WPA2).';
+  if (pw.length > 63) return 'At most 63 characters.';
+  if (!/^[\x20-\x7E]+$/.test(pw)) return 'Use printable ASCII only: letters, digits, spaces and symbols, no accents or emoji.';
+  return null;
+}
+
+/** Root shell timeout range, the same on the Server, the simulator and the Agent. */
+export const SHELL_TIMEOUT_MAX_S = 600;
+
+/** Whole seconds 1..SHELL_TIMEOUT_MAX_S, or null. */
+export function parseShellTimeout(text: string): number | null {
+  if (!/^\d+$/.test(text.trim())) return null;
+  const n = Number(text);
+  return n >= 1 && n <= SHELL_TIMEOUT_MAX_S ? n : null;
+}
+
+/** One-line human description of a command with its arguments. Secret arguments never appear. */
+export function describeCommand(name: CommandName, rawArgs: Record<string, unknown> = {}): string {
   const label = COMMANDS[name]?.label ?? name;
+  const args = withoutSecretArgs(name, rawArgs ?? {});
   switch (name) {
     case 'mobile_data':
     case 'airplane_mode':

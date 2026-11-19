@@ -1,10 +1,8 @@
 import { useEffect, useState } from 'react';
-import { Link } from 'react-router-dom';
 import { useRegisterSW } from 'virtual:pwa-register/react';
 import { formatCountdown } from '../../lib/format';
 import { useNow } from '../../lib/hooks';
 import { useConn } from '../../store/conn';
-import { useSession } from '../../store/session';
 import { useToasts } from '../../store/toasts';
 import { IconX } from '../ui/icons';
 import { Button, Spinner, cx } from '../ui/primitives';
@@ -47,23 +45,6 @@ export function ConnectionBanner() {
             Retry now
           </Button>
         ) : null}
-      </div>
-    </div>
-  );
-}
-
-export function TotpBanner() {
-  const required = useSession((s) => s.totpEnrollmentRequired);
-  if (!required) return null;
-  return (
-    <div role="status" className="border-b border-info/30 bg-info-soft">
-      <div className="mx-auto flex max-w-6xl flex-wrap items-center gap-3 px-4 py-2 text-sm">
-        <span className="text-fg">
-          <strong>Two-factor authentication required.</strong> Admins must set it up before using controls or changing settings.
-        </span>
-        <Link to="/enroll" className="font-semibold text-accent underline underline-offset-2">
-          Set it up now
-        </Link>
       </div>
     </div>
   );

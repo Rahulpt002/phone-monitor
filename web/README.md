@@ -37,11 +37,11 @@ Server allows that origin in `CORS_ORIGINS`.
 **Same origin (default).** `npm run build` at the repo root builds this app; the Server serves `web/dist` (see
 `WEB_DIST`) next to `/api` and the sockets. Nothing else to configure.
 
-**Separately on Vercel (optional).** Create a Vercel project with Root Directory `web` (keep "Include files outside
-the root directory" on, because `@hsm/shared` lives in the workspace). `web/vercel.json` installs from the repo
-root, builds, serves `dist`, and rewrites every route except `/assets/*` to `index.html` (so a chunk that a newer
-deploy removed answers 404, not HTML). Set `VITE_API_BASE` to the Server URL in the Vercel project, and add the
-Vercel URL to the Server's `CORS_ORIGINS`.
+**Separately on Vercel (optional).** Create a Vercel project whose Root Directory is the repository root. The root
+`vercel.json` installs (`npm ci`), builds (`npm run build -w web`), serves `web/dist`, rewrites every path except
+`/assets/*` to `index.html` (so a chunk that a newer deploy removed answers 404, not HTML) and sets the cache and
+security headers. Set `VITE_API_BASE` (a build-time variable) to the Server URL in the Vercel project, and add the
+Vercel URL to the Server's `CORS_ORIGINS` (see [docs/deploy.md](../docs/deploy.md) section 3).
 
 ## Install on the monitoring phone
 
@@ -65,6 +65,8 @@ Login and Overview are in the first-paint bundle; every other screen is lazy-loa
 and the QR encoder loads on first use. The service worker precaches all chunks, so the installed app still opens
 every screen offline. A chunk that fails to load shows a Reload notice instead of a blank page.
 
-Viewer accounts see everything except Controls, the root console and Messages (plan 9). Admins without TOTP are
-guided to enrol before any control or settings change. Controls the phone reports as unsupported in its capability
-map are hidden; controls not yet probed are shown.
+Viewer accounts see everything except Controls, the root console and Messages (plan 9). TOTP is required for every
+account (plan 10): a user without it only gets the `/enroll` page, and the app opens neither the dashboard socket nor
+any device data until enrollment is done. User management and changes to the device profile override ask for the
+admin's own password again. Controls the phone reports as unsupported in its capability map are hidden; controls not
+yet probed are shown.

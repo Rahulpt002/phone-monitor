@@ -1,135 +1,148 @@
 /**
  * Settings > Users (admin): add users, change roles, reset a password or a lost authenticator,
- * delete users. The Server enforces the same rules (last admin, yourself).
+ * delete users. Every change asks for your own password again (reauth_password, plan 10), and your
+ * own password and authenticator are changed under My account, which needs the current password.
+ * The Server enforces the same rules (last admin, yourself).
  */
 import type { Role, UserInfo } from '@hsm/shared';
 import { useState } from 'react';
-import { api, errorMessage, isApiError } from '../../lib/api';
+import { Link } from 'react-router-dom';
+import { api, errorMessage } from '../../lib/api';
 import { formatDate } from '../../lib/format';
 import { useAsync } from '../../lib/hooks';
 import { useCanControl } from '../../store/selectors';
 import { useSession } from '../../store/session';
 import { toast } from '../../store/toasts';
-import { Dialog } from '../ui/Dialog';
 import { Field, Select, TextInput } from '../ui/forms';
 import { Badge, Button, Card, Empty, Loading, Notice, TableWrap, cx, td, th } from '../ui/primitives';
+import { ReauthDialog } from './ReauthDialog';
 
 export const MIN_PASSWORD = 10;
+
+const roleName = (role: Role) => (role === 'admin' ? 'an admin' : 'a viewer');
 
 function CreateUser({ onCreated, disabled }: { onCreated: (u: UserInfo) => void; disabled: boolean }) {
   const [username, setUsername] = useState('');
   const [password, setPassword] = useState('');
   const [role, setRole] = useState<Role>('viewer');
-  const [busy, setBusy] = useState(false);
-  const [error, setError] = useState<string | null>(null);
+  const [confirming, setConfirming] = useState(false);
   const userErr = !/^[a-zA-Z0-9._-]{3,32}$/.test(username) ? '3 to 32 letters, digits, dot, dash or underscore.' : null;
   const pwErr = password.length < MIN_PASSWORD ? `At least ${MIN_PASSWORD} characters.` : null;
   const [touched, setTouched] = useState(false);
   return (
-    <form
-      className="grid grid-cols-1 gap-3 sm:grid-cols-[1fr_1fr_10rem_auto] sm:items-end"
-      onSubmit={async (e) => {
-        e.preventDefault();
-        setTouched(true);
-        if (userErr || pwErr) return;
-        setBusy(true);
-        setError(null);
-        try {
-          const u = await api.createUser({ username, password, role });
+    <>
+      <form
+        className="grid grid-cols-1 gap-3 sm:grid-cols-[1fr_1fr_10rem_auto] sm:items-end"
+        onSubmit={(e) => {
+          e.preventDefault();
+          setTouched(true);
+          if (!userErr && !pwErr) setConfirming(true);
+        }}
+      >
+        <Field label="Username" error={touched ? userErr : null}>
+          {({ id, describedBy, invalid }) => (
+            <TextInput id={id} autoComplete="off" autoCapitalize="none" value={username} onChange={(e) => setUsername(e.target.value)} aria-describedby={describedBy} aria-invalid={invalid} disabled={disabled} />
+          )}
+        </Field>
+        <Field label="Password" error={touched ? pwErr : null}>
+          {({ id, describedBy, invalid }) => (
+            <TextInput id={id} type="password" autoComplete="new-password" value={password} onChange={(e) => setPassword(e.target.value)} aria-describedby={describedBy} aria-invalid={invalid} disabled={disabled} />
+          )}
+        </Field>
+        <Field label="Role">
+          {({ id }) => (
+            <Select id={id} value={role} onChange={(e) => setRole(e.target.value as Role)} disabled={disabled}>
+              <option value="viewer">Viewer</option>
+              <option value="admin">Admin</option>
+            </Select>
+          )}
+        </Field>
+        <Button type="submit" variant="primary" disabled={disabled}>
+          Add user
+        </Button>
+      </form>
+      {/* Outside the form above: React events from the dialog's own form bubble through the portal. */}
+      <ReauthDialog
+        open={confirming}
+        onClose={() => setConfirming(false)}
+        title={`Add ${username} as ${roleName(role)}?`}
+        description={
+          role === 'admin'
+            ? 'Admins can control the phone with root access, read its messages and manage users.'
+            : 'Viewers can monitor the phone but have no controls, root shell or messages.'
+        }
+        confirmLabel="Add user"
+        onConfirm={async (reauth_password) => {
+          const u = await api.createUser({ username, password, role, reauth_password });
           onCreated(u);
           setUsername('');
           setPassword('');
           setTouched(false);
-          toast.success(`User ${u.username} created.`);
-        } catch (err) {
-          setError(errorMessage(err));
-        } finally {
-          setBusy(false);
-        }
-      }}
-    >
-      <Field label="Username" error={touched ? userErr : null}>
-        {({ id, describedBy, invalid }) => (
-          <TextInput id={id} autoComplete="off" autoCapitalize="none" value={username} onChange={(e) => setUsername(e.target.value)} aria-describedby={describedBy} aria-invalid={invalid} disabled={disabled} />
-        )}
-      </Field>
-      <Field label="Password" error={touched ? pwErr : null}>
-        {({ id, describedBy, invalid }) => (
-          <TextInput id={id} type="password" autoComplete="new-password" value={password} onChange={(e) => setPassword(e.target.value)} aria-describedby={describedBy} aria-invalid={invalid} disabled={disabled} />
-        )}
-      </Field>
-      <Field label="Role">
-        {({ id }) => (
-          <Select id={id} value={role} onChange={(e) => setRole(e.target.value as Role)} disabled={disabled}>
-            <option value="viewer">Viewer</option>
-            <option value="admin">Admin</option>
-          </Select>
-        )}
-      </Field>
-      <Button type="submit" variant="primary" busy={busy} disabled={disabled}>
-        Add user
-      </Button>
-      {error ? (
-        <div className="sm:col-span-4">
-          <Notice tone="danger">{error}</Notice>
-        </div>
-      ) : null}
-    </form>
+          setConfirming(false);
+          toast.success(`User ${u.username} created. They set up two-factor authentication when they first sign in.`);
+        }}
+      />
+    </>
   );
 }
 
 /** What resetting `u`'s two-factor authentication does, worded for the confirm dialog. */
-export function resetTotpExplanation(u: UserInfo, self: boolean): string {
-  if (self) {
-    return 'This clears your authenticator and signs you out on every other device; this browser stays signed in. You must set up two-factor authentication again before you can make changes.';
-  }
-  const admin = u.role === 'admin' ? ' As an admin they must set it up again before they can make changes.' : '';
-  return `This clears ${u.username}’s authenticator and signs them out on every device. They sign in again with their password only, then can set up two-factor authentication again.${admin}`;
+export function resetTotpExplanation(u: UserInfo): string {
+  return `This clears ${u.username}’s authenticator and signs them out on every device; their push notifications stop too. They sign in with their password and must set up two-factor authentication again before they can use the Dashboard.`;
 }
+
+type Pending =
+  | { kind: 'role'; user: UserInfo; role: Role }
+  | { kind: 'password'; user: UserInfo }
+  | { kind: 'totp'; user: UserInfo }
+  | { kind: 'delete'; user: UserInfo };
 
 export function UsersPanel() {
   const me = useSession((s) => s.user);
   const canControl = useCanControl();
-  const { data, loading, error, setData, reload } = useAsync(() => api.users(), []);
-  const [resetFor, setResetFor] = useState<UserInfo | null>(null);
-  const [totpFor, setTotpFor] = useState<UserInfo | null>(null);
-  const [deleteFor, setDeleteFor] = useState<UserInfo | null>(null);
+  const { data, loading, error, setData } = useAsync(() => api.users(), []);
+  const [pending, setPending] = useState<Pending | null>(null);
   const [newPw, setNewPw] = useState('');
-  const [busy, setBusy] = useState(false);
-  const [dialogError, setDialogError] = useState<string | null>(null);
   const users = data ?? [];
   const admins = users.filter((u) => u.role === 'admin').length;
-
-  const changeRole = async (u: UserInfo, role: Role) => {
-    try {
-      const updated = await api.updateUser(u.id, { role });
-      setData(users.map((x) => (x.id === u.id ? updated : x)));
-      toast.success(`${u.username} is now ${role === 'admin' ? 'an admin' : 'a viewer'}.`);
-    } catch (e) {
-      toast.error(errorMessage(e));
-      reload();
-    }
+  const replace = (updated: UserInfo) => setData(users.map((x) => (x.id === updated.id ? updated : x)));
+  const open = (p: Pending) => {
+    setNewPw('');
+    setPending(p);
   };
 
-  const resetTotp = async () => {
-    if (!totpFor) return;
-    const target = totpFor;
-    setBusy(true);
-    setDialogError(null);
-    try {
-      const updated = await api.updateUser(target.id, { reset_totp: true });
-      setData(users.map((x) => (x.id === target.id ? updated : x)));
-      setTotpFor(null);
-      toast.success(`Two-factor authentication for ${target.username} was reset.`);
-      // Resetting yourself makes you an admin without 2FA: pick up the enrollment requirement.
-      if (target.id === me?.id) await useSession.getState().refreshMe();
-    } catch (err) {
-      if (isApiError(err, 'totp_enrollment_required')) useSession.getState().setTotpEnrollmentRequired(true);
-      setDialogError(errorMessage(err));
-    } finally {
-      setBusy(false);
+  const confirm = async (reauth_password: string) => {
+    if (!pending) return;
+    const { user } = pending;
+    switch (pending.kind) {
+      case 'role': {
+        replace(await api.updateUser(user.id, { role: pending.role, reauth_password }));
+        toast.success(`${user.username} is now ${roleName(pending.role)}.`);
+        break;
+      }
+      case 'password': {
+        if (newPw.length < MIN_PASSWORD) throw new Error(`The new password needs at least ${MIN_PASSWORD} characters.`);
+        await api.updateUser(user.id, { password: newPw, reauth_password });
+        toast.success(`Password for ${user.username} changed. They are signed out everywhere.`);
+        break;
+      }
+      case 'totp': {
+        replace(await api.updateUser(user.id, { reset_totp: true, reauth_password }));
+        toast.success(`Two-factor authentication for ${user.username} was reset.`);
+        break;
+      }
+      case 'delete': {
+        await api.deleteUser(user.id, { reauth_password });
+        setData(users.filter((x) => x.id !== user.id));
+        toast.success(`${user.username} deleted.`);
+        break;
+      }
     }
+    setPending(null);
+    setNewPw('');
   };
+
+  const dialog = pending ? dialogText(pending) : null;
 
   return (
     <div className="space-y-4">
@@ -170,7 +183,10 @@ export function UsersPanel() {
                         <Select
                           id={`role-${u.id}`}
                           value={u.role}
-                          onChange={(e) => changeRole(u, e.target.value as Role)}
+                          onChange={(e) => {
+                            const role = e.target.value as Role;
+                            if (role !== u.role) open({ kind: 'role', user: u, role });
+                          }}
                           disabled={!canControl || self || lastAdmin}
                           className="py-1.5"
                         >
@@ -178,44 +194,47 @@ export function UsersPanel() {
                           <option value="viewer">Viewer</option>
                         </Select>
                       </td>
-                      <td className={td}>{u.totp_enabled ? <Badge tone="ok">On</Badge> : <Badge tone={u.role === 'admin' ? 'warn' : 'neutral'}>Off</Badge>}</td>
+                      <td className={td}>
+                        {/* Required for every account (plan 10): without it the user only sees the setup page. */}
+                        {u.totp_enabled ? <Badge tone="ok">On</Badge> : <Badge tone="warn">Not set up</Badge>}
+                      </td>
                       <td className={cx(td, 'text-muted')}>{formatDate(u.created_at)}</td>
                       <td className={cx(td, 'whitespace-nowrap text-right')}>
-                        <Button
-                          size="sm"
-                          variant="ghost"
-                          disabled={!canControl}
-                          onClick={() => {
-                            setResetFor(u);
-                            setNewPw('');
-                            setDialogError(null);
-                          }}
-                        >
-                          Reset password
-                        </Button>
-                        <Button
-                          size="sm"
-                          variant="ghost"
-                          disabled={!canControl || !u.totp_enabled}
-                          title={u.totp_enabled ? `Clear ${u.username}’s authenticator (lost phone)` : `${u.username} has no two-factor authentication to reset`}
-                          aria-label={`Reset two-factor authentication for ${u.username}`}
-                          onClick={() => {
-                            setTotpFor(u);
-                            setDialogError(null);
-                          }}
-                        >
-                          Reset 2FA
-                        </Button>
+                        {self ? (
+                          <Link to="/settings?tab=account" className="mr-2 text-sm text-accent underline underline-offset-2">
+                            Your password and 2FA: My account
+                          </Link>
+                        ) : (
+                          <>
+                            <Button
+                              size="sm"
+                              variant="ghost"
+                              disabled={!canControl}
+                              aria-label={`Reset password for ${u.username}`}
+                              onClick={() => open({ kind: 'password', user: u })}
+                            >
+                              Reset password
+                            </Button>
+                            <Button
+                              size="sm"
+                              variant="ghost"
+                              disabled={!canControl || !u.totp_enabled}
+                              title={u.totp_enabled ? `Clear ${u.username}’s authenticator (lost phone)` : `${u.username} has no two-factor authentication to reset`}
+                              aria-label={`Reset two-factor authentication for ${u.username}`}
+                              onClick={() => open({ kind: 'totp', user: u })}
+                            >
+                              Reset 2FA
+                            </Button>
+                          </>
+                        )}
                         <Button
                           size="sm"
                           variant="ghost"
                           className="text-danger"
                           disabled={!canControl || self || lastAdmin}
                           title={self ? 'You cannot delete yourself' : lastAdmin ? 'Cannot delete the last admin' : undefined}
-                          onClick={() => {
-                            setDeleteFor(u);
-                            setDialogError(null);
-                          }}
+                          aria-label={`Delete ${u.username}`}
+                          onClick={() => open({ kind: 'delete', user: u })}
                         >
                           Delete
                         </Button>
@@ -231,105 +250,46 @@ export function UsersPanel() {
         ) : null}
       </Card>
 
-      <Dialog
-        open={Boolean(resetFor)}
-        onClose={() => setResetFor(null)}
-        title={`Reset password for ${resetFor?.username ?? ''}`}
-        footer={
-          <>
-            <Button onClick={() => setResetFor(null)}>Cancel</Button>
-            <Button variant="primary" type="submit" form="reset-pw" busy={busy}>
-              Set password
-            </Button>
-          </>
-        }
+      <ReauthDialog
+        open={Boolean(pending)}
+        onClose={() => setPending(null)}
+        title={dialog?.title ?? ''}
+        description={dialog?.description}
+        confirmLabel={dialog?.confirm ?? 'Confirm'}
+        danger={pending?.kind === 'totp' || pending?.kind === 'delete'}
+        onConfirm={confirm}
       >
-        <form
-          id="reset-pw"
-          onSubmit={async (e) => {
-            e.preventDefault();
-            if (!resetFor) return;
-            if (newPw.length < MIN_PASSWORD) {
-              setDialogError(`At least ${MIN_PASSWORD} characters.`);
-              return;
-            }
-            setBusy(true);
-            try {
-              await api.updateUser(resetFor.id, { password: newPw });
-              toast.success(`Password for ${resetFor.username} changed.`);
-              setResetFor(null);
-            } catch (err) {
-              setDialogError(errorMessage(err));
-            } finally {
-              setBusy(false);
-            }
-          }}
-        >
-          <Field label="New password" error={dialogError}>
-            {({ id, describedBy, invalid }) => (
-              <TextInput id={id} type="password" autoComplete="new-password" value={newPw} onChange={(e) => setNewPw(e.target.value)} aria-describedby={describedBy} aria-invalid={invalid} data-autofocus />
+        {pending?.kind === 'password' ? (
+          <Field label={`New password for ${pending.user.username}`} help={`At least ${MIN_PASSWORD} characters. They are signed out on every device.`}>
+            {({ id, describedBy }) => (
+              <TextInput id={id} type="password" autoComplete="new-password" value={newPw} onChange={(e) => setNewPw(e.target.value)} aria-describedby={describedBy} data-autofocus />
             )}
           </Field>
-        </form>
-      </Dialog>
-
-      <Dialog
-        open={Boolean(totpFor)}
-        onClose={() => setTotpFor(null)}
-        title={`Reset two-factor authentication for ${totpFor?.username ?? ''}?`}
-        footer={
-          <>
-            <Button onClick={() => setTotpFor(null)} data-autofocus>
-              Cancel
-            </Button>
-            <Button variant="danger" busy={busy} onClick={resetTotp}>
-              Reset 2FA
-            </Button>
-          </>
-        }
-      >
-        <div className="space-y-3">
-          <p className="text-sm text-fg">{totpFor ? resetTotpExplanation(totpFor, totpFor.id === me?.id) : null}</p>
+        ) : pending?.kind === 'totp' ? (
           <p className="text-sm text-muted">Use this when their phone with the authenticator app is lost or reset.</p>
-          {dialogError ? <Notice tone="danger">{dialogError}</Notice> : null}
-        </div>
-      </Dialog>
-
-      <Dialog
-        open={Boolean(deleteFor)}
-        onClose={() => setDeleteFor(null)}
-        title={`Delete ${deleteFor?.username ?? ''}?`}
-        description="They are signed out and cannot sign in again."
-        footer={
-          <>
-            <Button onClick={() => setDeleteFor(null)} data-autofocus>
-              Cancel
-            </Button>
-            <Button
-              variant="danger"
-              busy={busy}
-              onClick={async () => {
-                if (!deleteFor) return;
-                setBusy(true);
-                try {
-                  await api.deleteUser(deleteFor.id);
-                  setData(users.filter((x) => x.id !== deleteFor.id));
-                  toast.success(`${deleteFor.username} deleted.`);
-                  setDeleteFor(null);
-                } catch (err) {
-                  setDialogError(errorMessage(err));
-                } finally {
-                  setBusy(false);
-                }
-              }}
-            >
-              Delete user
-            </Button>
-          </>
-        }
-      >
-        {dialogError ? <Notice tone="danger">{dialogError}</Notice> : <p className="text-sm text-muted">This cannot be undone.</p>}
-      </Dialog>
+        ) : null}
+      </ReauthDialog>
     </div>
   );
+}
+
+function dialogText(p: Pending): { title: string; description: string; confirm: string } {
+  const name = p.user.username;
+  switch (p.kind) {
+    case 'role':
+      return {
+        title: `Make ${name} ${roleName(p.role)}?`,
+        description:
+          p.role === 'admin'
+            ? 'Admins can control the phone with root access, read its messages and manage users.'
+            : 'They keep monitoring but lose controls, the root shell, messages and user management. Their open Dashboards switch over at once.',
+        confirm: 'Change role',
+      };
+    case 'password':
+      return { title: `Reset password for ${name}`, description: 'Sets a new password for them; tell them through a safe channel.', confirm: 'Set password' };
+    case 'totp':
+      return { title: `Reset two-factor authentication for ${name}?`, description: resetTotpExplanation(p.user), confirm: 'Reset 2FA' };
+    case 'delete':
+      return { title: `Delete ${name}?`, description: 'They are signed out and cannot sign in again. This cannot be undone.', confirm: 'Delete user' };
+  }
 }

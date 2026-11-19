@@ -2,6 +2,10 @@
  * Dashboard socket (docs/protocol.md section 5): connect, `auth` within 10 s, `subscribe` with the
  * current device and Finder flag, `ping` every 25 s, reconnect with backoff, re-auth and re-subscribe.
  * Every other message goes to the data store reducer.
+ *
+ * Close codes (protocol section 7): 4001 = the session is gone (sign out), 4004 = the user's role
+ * changed (reconnect at once and reload /auth/me), 1013 and everything else = reconnect with
+ * backoff, keeping the token. Not opened at all while the user still has to enrol TOTP.
  */
 import type { DashboardToServer } from '@hsm/shared';
 import { create } from 'zustand';
@@ -27,9 +31,14 @@ interface ConnState {
   retryNow: () => void;
 }
 
+/** Server close codes for the dashboard socket (docs/protocol.md section 7). */
+export const CLOSE_UNAUTHORIZED = 4001;
+export const CLOSE_ROLE_CHANGED = 4004;
+
 const PING_MS = 25_000;
 const STALE_MS = 70_000; // no message at all (not even pong) for this long -> reconnect
 const AUTH_TIMEOUT_MS = 15_000;
+const ROLE_CHANGE_QUIET_MS = 10_000;
 
 export const useConn = create<ConnState>()((set, get) => ({
   status: 'idle',
@@ -57,6 +66,7 @@ let pingTimer: ReturnType<typeof setInterval> | null = null;
 let authTimer: ReturnType<typeof setTimeout> | null = null;
 let lastMessageAt = 0;
 let lastSubscribe = '';
+let lastRoleChangeAt = Number.NEGATIVE_INFINITY;
 
 function clearTimers() {
   if (reconnectTimer) clearTimeout(reconnectTimer);
@@ -137,7 +147,7 @@ function connect() {
     if (!msg || typeof msg !== 'object') return;
     const t = (msg as { t?: unknown }).t;
     if (t === 'auth_ok') onAuthOk();
-    else if (t === 'auth_failed') onAuthFailed();
+    else if (t === 'auth_failed') onAuthFailed((msg as { message?: unknown }).message);
     else if (t === 'pong') return;
     else useData.getState().apply(msg);
   };
@@ -146,8 +156,12 @@ function connect() {
     if (ws !== sock) return;
     ws = null;
     clearTimers();
-    if (ev.code === 4001) {
-      onAuthFailed();
+    if (ev.code === CLOSE_UNAUTHORIZED) {
+      onAuthFailed(ev.reason);
+      return;
+    }
+    if (ev.code === CLOSE_ROLE_CHANGED) {
+      onRoleChanged();
       return;
     }
     scheduleReconnect();
@@ -184,9 +198,29 @@ function onAuthOk() {
   }, PING_MS);
 }
 
-function onAuthFailed() {
+function onAuthFailed(message?: unknown) {
   stopSocket();
-  if (useSession.getState().token) useSession.getState().logout('Your session has expired. Please sign in again.', false);
+  const session = useSession.getState();
+  if (!session.token) return;
+  // A valid session without TOTP: enrollment, not sign-out (the app then shows /enroll).
+  if (message === 'totp_enrollment_required') session.setTotpEnrollmentRequired(true);
+  else session.logout('Your session has expired. Please sign in again.', false);
+}
+
+/**
+ * 4004: same session, new role. Reconnect at once (auth_ok carries the new role) and reload
+ * /auth/me. A second 4004 right after the first falls back to the backoff, so it cannot spin.
+ */
+function onRoleChanged() {
+  void useSession.getState().refreshMe();
+  const now = Date.now();
+  const repeated = now - lastRoleChangeAt < ROLE_CHANGE_QUIET_MS;
+  lastRoleChangeAt = now;
+  if (stopped || repeated) {
+    scheduleReconnect();
+    return;
+  }
+  connect();
 }
 
 function scheduleReconnect() {
@@ -206,6 +240,8 @@ function scheduleReconnect() {
 }
 
 export function startSocket(sessionToken: string): void {
+  // The Server refuses the socket until TOTP is enrolled (plan 10).
+  if (useSession.getState().totpEnrollmentRequired) return;
   if (!stopped && token === sessionToken && ws) return;
   token = sessionToken;
   stopped = false;
@@ -249,5 +285,12 @@ if (typeof window !== 'undefined') {
   onLogout(() => {
     stopSocket();
     useData.getState().reset();
+  });
+  // Enrollment became required (a 403 or auth_failed): close the socket and drop device data.
+  useSession.subscribe((s, prev) => {
+    if (s.totpEnrollmentRequired && !prev.totpEnrollmentRequired) {
+      stopSocket();
+      useData.getState().reset();
+    }
   });
 }

@@ -3,6 +3,7 @@ import { Field, TextInput } from '../components/ui/forms';
 import { Button, Notice } from '../components/ui/primitives';
 import { ThemeToggle } from '../components/layout/TopBar';
 import { api, errorMessage, isApiError } from '../lib/api';
+import { deviceTokenFor, rememberDeviceToken } from '../lib/knownDevice';
 import { useDocumentTitle } from '../lib/hooks';
 import { useSession } from '../store/session';
 
@@ -35,12 +36,14 @@ export function LoginScreen() {
     setBusy(true);
     setError(null);
     try {
-      const res = await api.login({ username: username.trim(), password });
+      const name = username.trim();
+      const res = await api.login({ username: name, password, device_token: deviceTokenFor(name) });
       if (res.totp_required) {
         setPending(res.pending_token);
         setStep('totp');
         setCode('');
       } else {
+        rememberDeviceToken(name, res.device_token);
         await finish(res.token, res.user);
       }
     } catch (e) {
@@ -60,7 +63,9 @@ export function LoginScreen() {
     setBusy(true);
     setError(null);
     try {
-      const res = await api.totpLogin(pending, clean);
+      const name = username.trim();
+      const res = await api.totpLogin(pending, clean, deviceTokenFor(name));
+      rememberDeviceToken(name, res.device_token);
       await finish(res.token, res.user);
     } catch (e) {
       if (isApiError(e, 'unauthorized') && /expired/i.test(errorMessage(e))) {

@@ -12,7 +12,7 @@ import { Tabs } from '../components/ui/Tabs';
 import { usePagedList } from '../components/usePagedList';
 import { api } from '../lib/api';
 import { applyAppChanges, parseAppList } from '../lib/apps';
-import { STATUS_META, describeCommand, hasResult } from '../lib/commandMeta';
+import { SHELL_TIMEOUT_MAX_S, STATUS_META, describeCommand, hasResult, parseShellTimeout } from '../lib/commandMeta';
 import { DASH, formatDateTime, formatDuration, formatMb, formatRelative, titleCase, trimNumber } from '../lib/format';
 import { useDocumentTitle, useNow } from '../lib/hooks';
 import { useCanControl, useCommand, useDeviceCommands, useDeviceEvents, useDeviceId, useDeviceSettings, useIsAdmin, useLastCommands, useSnapshot } from '../store/selectors';
@@ -508,7 +508,7 @@ const EVENT_KINDS: EventKind[] = [
   'agent_start', 'boot', 'connectivity', 'cell_change', 'net_type_change', 'tether_up', 'tether_down', 'usb_connected',
   'usb_disconnected', 'power_connected', 'power_lost', 'weak_power', 'temp_warning', 'temp_critical', 'temp_normal',
   'charging_stopped', 'charging_resumed', 'radio_rest', 'watchdog_action', 'command', 'revert', 'moved', 'sms_received',
-  'reboot_blocked', 'settings_applied', 'finder', 'error',
+  'reboot_blocked', 'settings_applied', 'settings_changed', 'finder', 'error',
 ];
 const EVENTS_PAGE = 100;
 
@@ -633,15 +633,17 @@ function ConsoleTab() {
     scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight });
   }, [entries]);
 
+  const timeoutS = parseShellTimeout(timeout);
+  const timeoutErr = timeoutS == null ? `1 to ${SHELL_TIMEOUT_MAX_S} s.` : null;
+
   const submit = async () => {
     const cmd = input.trim();
-    if (!cmd || busy) return;
-    const t = Number(timeout);
+    if (!cmd || busy || timeoutS == null) return;
     setBusy(true);
     try {
       const rec = await run(
         'shell',
-        { cmd, timeout_s: Number.isInteger(t) && t >= 1 && t <= 600 ? t : 30 },
+        { cmd, timeout_s: timeoutS },
         { password: passwordRef.current, onPassword: (pw) => (passwordRef.current = pw), quiet: true },
       );
       if (!rec) return;
@@ -717,10 +719,22 @@ function ConsoleTab() {
             </div>
           )}
         </Field>
-        <Field label="Timeout (s)" className="w-28">
-          {({ id }) => <TextInput id={id} type="number" min={1} max={600} value={timeout} onChange={(e) => setTimeoutS(e.target.value)} />}
+        <Field label="Timeout (s)" className="w-28" error={timeoutErr}>
+          {({ id, describedBy, invalid }) => (
+            <TextInput
+              id={id}
+              type="number"
+              inputMode="numeric"
+              min={1}
+              max={SHELL_TIMEOUT_MAX_S}
+              value={timeout}
+              onChange={(e) => setTimeoutS(e.target.value)}
+              aria-describedby={describedBy}
+              aria-invalid={invalid}
+            />
+          )}
         </Field>
-        <Button type="submit" variant="danger" busy={busy} disabled={!input.trim()}>
+        <Button type="submit" variant="danger" busy={busy} disabled={!input.trim() || Boolean(timeoutErr)}>
           Run as root
         </Button>
       </form>
