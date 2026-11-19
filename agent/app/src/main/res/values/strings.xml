@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">Hotspot Agent</string>
+    <string name="notification_channel_name">Agent status</string>
+    <string name="notification_channel_description">Shows that the hotspot monitor is running.</string>
+    <string name="notification_text">Monitoring signal, power and tethering</string>
+</resources>

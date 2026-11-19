@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- FileProvider (authority com.hotspotmonitor.agent.files): Finder CSV exports and log files. -->
+<paths>
+    <cache-path name="exports" path="exports/" />
+    <files-path name="logs" path="logs/" />
+</paths>
