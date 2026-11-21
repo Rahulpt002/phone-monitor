@@ -11,7 +11,7 @@
   "usb_function": "rndis",
   "autoboot": {
     "method": "magisk_autoboot",
-    "note": "Not proven yet on SM-M526B: no auto-boot module installed. Run phase0.sh autoboot --test once one is."
+    "note": "tools/autoboot/install-samsung.sh puts hsm-autoboot.rc in /system/etc/init: when the charging-only screen (lpm) starts, init reboots into Android with reason 'reboot,lpm', as lpm does on a Power press. Magisk does not run in charging-only mode, so a Magisk module or overlay.d rc cannot do this. Proven on SM-M526B 2026-11-22 (phase0.sh autoboot --test PASS, back in about 65 s, root PASS, also with batt_slate_mode=1). A firmware flash removes it: run the script again."
   },
   "thermal": {
     "cpu": ["cpu"],

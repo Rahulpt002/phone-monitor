@@ -1,0 +1,7 @@
+# Hotspot Monitor: automatic power-on (plan 4.3).
+# When power returns to a phone that is off, Samsung starts the charging-only screen (service
+# 'lpm', class sec-charger, only in charger mode). Reboot straight into Android the same way lpm
+# does when Power is pressed. Magisk does not run in charger mode, so this lives in /system.
+on property:init.svc.lpm=running
+    write /dev/kmsg "hsm-autoboot: charging-only mode, booting Android"
+    setprop sys.powerctl reboot,lpm

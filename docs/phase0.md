@@ -152,10 +152,14 @@ animation and stay off. The phone must boot by itself (plan 4.3):
   `fastboot oem off-mode-charge 0`, `fastboot reboot`. If fastboot rejects the command, this
   bootloader lacks it: use a root method instead.
 - **Samsung (no fastboot)**: a root change that makes the charging-only mode (LPM) reboot into
-  Android, such as an auto-boot Magisk module or boot-image patch, or on older models replacing
-  the charging-animation program. Support varies by model, which is why this is the first Samsung
-  test (Appendix A.2). Samsung's "power on when plugged in" is a Knox enterprise policy, not a
-  user setting.
+  Android. Run `tools/autoboot/install-samsung.sh`: it adds `hsm-autoboot.rc` to
+  `/system/etc/init/`, which reboots into Android as soon as the charging screen (`lpm`) starts.
+  It has to live in `/system`: **Magisk does not run in charging-only mode** (magiskinit aborts
+  there), so a Magisk module or a Magisk `overlay.d` rc file never fires. The script needs root,
+  vbmeta verification disabled (done when rooting) and an ext4 system partition without
+  `shared_blocks`; it checks these. A firmware flash removes the rule. On older models replacing
+  the charging-animation program is the alternative. Samsung's "power on when plugged in" is a
+  Knox enterprise policy, not a user setting. Proven on the Galaxy M52 (SM-M526B).
 
 `--test` shuts the phone down while the cable stays connected, which puts it into charging-only
 mode (the state after power returns), and waits up to 4 minutes for Android to come back. A new

@@ -148,11 +148,13 @@ Set up and proved in Phase 0 ([`phase0.md` 2.3](phase0.md#23-automatic-power-on-
 
 ```sh
 tools/phase0/phase0.sh autoboot              # method for this phone
+tools/autoboot/install-samsung.sh            # Samsung: auto-boot rule in /system/etc/init
 tools/phase0/phase0.sh autoboot --fastboot   # phones with fastboot: off-mode-charge 0
 tools/phase0/phase0.sh autoboot --test       # must PASS
 ```
 
-The keep-alive module does not do this.
+The keep-alive module does not do this, and no Magisk module can on Samsung: Magisk does not run
+in charging-only mode. Re-run `install-samsung.sh` after any firmware flash.
 
 ### 2.9 Charge limit
 

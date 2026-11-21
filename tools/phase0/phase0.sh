@@ -1842,10 +1842,15 @@ cmd_autoboot() {
 		if root_ok; then
 			mods=$(rsh 'for m in /data/adb/modules/*; do [ -f "$m/module.prop" ] && printf "%s: %s\n" "${m##*/}" "$(grep -m1 "^name=" "$m/module.prop" | cut -d= -f2-)"; done')
 			field "Magisk modules" "$(oneline "${mods:-none}")"
-			if printf '%s' "$mods" | grep -qiE 'autoboot|auto.boot|lpm|charg'; then
+			if [ -n "$(rsh '[ -f /system/etc/init/hsm-autoboot.rc ] && echo yes')" ]; then
+				field "Auto-boot rule" "/system/etc/init/hsm-autoboot.rc (tools/autoboot/install-samsung.sh)"
+				note "Installed. Prove it with --test."
+			elif printf '%s' "$mods" | grep -qiE 'autoboot|auto.boot|lpm|charg'; then
 				note "A module that looks like an auto-boot module is installed. Prove it with --test."
+				note "Careful: Magisk does not run in charging-only mode, so a Magisk module cannot do this."
 			else
-				note "No auto-boot module found."
+				note "No auto-boot rule found. Install one: tools/autoboot/install-samsung.sh"
+				note "(Magisk does not run in charging-only mode, so a Magisk module cannot do this.)"
 			fi
 			field "/system/bin/lpm" "$(rsh '[ -e /system/bin/lpm ] && echo present || echo absent')"
 		fi
