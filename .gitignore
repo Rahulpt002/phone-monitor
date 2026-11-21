@@ -26,3 +26,10 @@ agent/.kotlin/
 *.aab
 *.keystore
 *.jks
+mobile/.gradle/
+mobile/build/
+mobile/app/build/
+mobile/local.properties
+mobile/keystore.properties
+mobile/.idea/
+mobile/.kotlin/

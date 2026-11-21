@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- Same as the Dashboard's dark theme (web/vite.config.ts manifest). -->
+    <color name="background">#0E1014</color>
+</resources>

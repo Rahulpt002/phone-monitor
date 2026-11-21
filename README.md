@@ -25,6 +25,7 @@ that contract.
 | `server/` | Server: REST under `/api`, `/ws/agent`, `/ws/dashboard`, `/healthz`; also serves the built Dashboard |
 | `web/` | Dashboard PWA |
 | `agent/` | Android Agent (Gradle), Magisk keep-alive module (`agent/magisk/`), device profiles (`agent/app/src/main/assets/profiles/`) |
+| `mobile/` | Hotspot Monitor phone app: the Dashboard as an Android app (Trusted Web Activity), see [mobile/README.md](mobile/README.md) |
 | `tools/agent-sim/` | Simulated phone that speaks the full Agent protocol, for development and demos without hardware |
 | `tools/phase0/` | adb scripts for the Phase 0 hardware tests on a candidate phone |
 | `deploy/` | Dockerfile, Docker Compose + Caddy (VPS option), `.env.example` |

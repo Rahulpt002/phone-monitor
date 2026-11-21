@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Long-press the app icon. URLs follow the default dashboardUrl (mobile/README.md). -->
+<shortcuts xmlns:android="http://schemas.android.com/apk/res/android">
+    <shortcut android:shortcutId="screen" android:enabled="true" android:icon="@mipmap/ic_launcher"
+        android:shortcutShortLabel="@string/shortcut_screen">
+        <intent android:action="android.intent.action.VIEW" android:data="https://gods-eye-tan.vercel.app/screen"
+            android:targetPackage="com.hotspotmonitor.dashboard"
+            android:targetClass="com.google.androidbrowserhelper.trusted.LauncherActivity" />
+    </shortcut>
+    <shortcut android:shortcutId="controls" android:enabled="true" android:icon="@mipmap/ic_launcher"
+        android:shortcutShortLabel="@string/shortcut_controls">
+        <intent android:action="android.intent.action.VIEW" android:data="https://gods-eye-tan.vercel.app/controls"
+            android:targetPackage="com.hotspotmonitor.dashboard"
+            android:targetClass="com.google.androidbrowserhelper.trusted.LauncherActivity" />
+    </shortcut>
+    <shortcut android:shortcutId="alerts" android:enabled="true" android:icon="@mipmap/ic_launcher"
+        android:shortcutShortLabel="@string/shortcut_alerts">
+        <intent android:action="android.intent.action.VIEW" android:data="https://gods-eye-tan.vercel.app/alerts"
+            android:targetPackage="com.hotspotmonitor.dashboard"
+            android:targetClass="com.google.androidbrowserhelper.trusted.LauncherActivity" />
+    </shortcut>
+</shortcuts>

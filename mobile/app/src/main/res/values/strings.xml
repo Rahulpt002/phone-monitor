@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">Hotspot Monitor</string>
+    <string name="shortcut_screen">Screen</string>
+    <string name="shortcut_controls">Controls</string>
+    <string name="shortcut_alerts">Alerts</string>
+</resources>
