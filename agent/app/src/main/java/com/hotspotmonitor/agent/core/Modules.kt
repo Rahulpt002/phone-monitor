@@ -16,6 +16,8 @@ import com.hotspotmonitor.agent.protocol.PairResponse
 import com.hotspotmonitor.agent.protocol.PositionInfo
 import com.hotspotmonitor.agent.protocol.PowerInfo
 import com.hotspotmonitor.agent.protocol.RadioInfo
+import com.hotspotmonitor.agent.protocol.ScreenStartMsg
+import com.hotspotmonitor.agent.protocol.ScreenStopMsg
 import com.hotspotmonitor.agent.protocol.Rates
 import com.hotspotmonitor.agent.protocol.SpeedSession
 import com.hotspotmonitor.agent.protocol.StopReason
@@ -412,4 +414,22 @@ interface PairingClient {
 
     /** Forgets the pairing locally and disconnects. */
     suspend fun unpair()
+}
+
+/**
+ * Remote screen (docs/protocol.md section 8): streams the screen through the bundled scrcpy
+ * server over a separate relay socket, one session at a time.
+ */
+interface ScreenMirror : AgentModule {
+    /** Session id being streamed, or null. */
+    val active: StateFlow<String?>
+
+    /** `screen_start` from the Server: start (or keep) this session, replacing any other. */
+    fun onStart(msg: ScreenStartMsg)
+
+    /** `screen_stop` from the Server. */
+    fun onStop(msg: ScreenStopMsg)
+
+    /** Capability entry `screen_mirror` for the capability map. */
+    suspend fun probe(): CapabilityEntry
 }

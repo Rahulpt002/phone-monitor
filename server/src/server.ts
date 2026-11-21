@@ -20,6 +20,7 @@ import { registerDataRoutes } from './routes/data.js';
 import { registerDeviceRoutes } from './routes/devices.js';
 import { registerConfigRoute, registerHealthRoute } from './routes/misc.js';
 import { registerStatic } from './routes/static.js';
+import { registerScreenRoutes } from './routes/screen.js';
 import { registerUserRoutes } from './routes/users.js';
 import { registerSecurityHeaders } from './security.js';
 import { AlertService } from './services/alerts.js';
@@ -27,12 +28,14 @@ import { CommandService } from './services/commands.js';
 import { DeviceService } from './services/devices.js';
 import { FinderService } from './services/finder.js';
 import { RecordService } from './services/records.js';
+import { ScreenService } from './services/screen.js';
 import { SettingsService } from './services/settings.js';
 import { TelemetryService } from './services/telemetry.js';
 import { systemClock, type Clock } from './util.js';
 import { handleAgentSocket } from './ws/agent.js';
 import { handleDashboardSocket } from './ws/dashboard.js';
 import { Hub } from './ws/hub.js';
+import { handleScreenAgentSocket, handleScreenViewSocket } from './ws/screen.js';
 
 export interface BuildOptions {
   clock?: Clock;
@@ -139,6 +142,7 @@ export async function buildServer(config: Config, options: BuildOptions = {}): P
   ctx.alerts = new AlertService(ctx);
   ctx.telegram = new TelegramNotifier(config.telegramBotToken, config.telegramChatId, app.log, options.fetch);
   ctx.push = new PushService(ctx, options.pushSender);
+  ctx.screen = new ScreenService(ctx);
 
   // Rebuild all state from the database: after a free-tier spin-down this is all there is.
   await ctx.auth.load();
@@ -170,6 +174,7 @@ export async function buildServer(config: Config, options: BuildOptions = {}): P
   await app.register(fastifyWebsocket, {
     options: { maxPayload: PROTOCOL.max_message_bytes, perMessageDeflate: AGENT_DEFLATE },
     preClose(done) {
+      ctx.screen.closeAll();
       ctx.hub.closeAll(1001, 'server shutting down');
       const wss = app.websocketServer;
       // Give clients a moment to finish the close handshake, then drop whatever is left.
@@ -228,6 +233,14 @@ export async function buildServer(config: Config, options: BuildOptions = {}): P
     },
     (socket, req) => handleDashboardSocket(ctx, socket, req),
   );
+  // Remote screen relay (docs/protocol.md section 8). No compression: H.264 does not shrink.
+  const noDeflate = async (req: { raw: { headers: Record<string, unknown> } }) => {
+    delete req.raw.headers['sec-websocket-extensions'];
+  };
+  app.get('/ws/screen/agent', { websocket: true, onRequest: noDeflate }, (socket, req) =>
+    handleScreenAgentSocket(ctx, socket, req),
+  );
+  app.get('/ws/screen/view', { websocket: true, onRequest: noDeflate }, (socket) => handleScreenViewSocket(ctx, socket));
   registerHealthRoute(app, ctx);
   const guards = makeGuards(ctx);
   await app.register(
@@ -239,6 +252,7 @@ export async function buildServer(config: Config, options: BuildOptions = {}): P
       registerDeviceRoutes(api, ctx, guards);
       registerDataRoutes(api, ctx, guards);
       registerAlertRoutes(api, ctx, guards);
+      registerScreenRoutes(api, ctx, guards);
     },
     { prefix: '/api' },
   );

@@ -9,6 +9,7 @@ import type { CommandService } from './services/commands.js';
 import type { DeviceService } from './services/devices.js';
 import type { FinderService } from './services/finder.js';
 import type { RecordService } from './services/records.js';
+import type { ScreenService } from './services/screen.js';
 import type { SettingsService } from './services/settings.js';
 import type { TelemetryService } from './services/telemetry.js';
 import type { Clock } from './util.js';
@@ -35,5 +36,6 @@ export interface AppContext {
   alerts: AlertService;
   telegram: TelegramNotifier;
   push: PushService;
+  screen: ScreenService;
   hub: Hub;
 }

@@ -6,6 +6,8 @@ import android.os.Build
 import com.hotspotmonitor.agent.core.AgentGraph
 import com.hotspotmonitor.agent.core.ConnState
 import com.hotspotmonitor.agent.core.SyncClient
+import com.hotspotmonitor.agent.protocol.ScreenStartMsg
+import com.hotspotmonitor.agent.protocol.ScreenStopMsg
 import com.hotspotmonitor.agent.protocol.AgentToServer
 import com.hotspotmonitor.agent.protocol.CmdMsg
 import com.hotspotmonitor.agent.protocol.FinderLive
@@ -207,6 +209,10 @@ class SyncClientImpl(private val graph: AgentGraph) : SyncClient {
         }
 
         override fun finderLive(): FinderLive? = graph.finder.live.value
+
+        override fun onScreenStart(msg: ScreenStartMsg) = graph.screen.onStart(msg)
+
+        override fun onScreenStop(msg: ScreenStopMsg) = graph.screen.onStop(msg)
     }
 
     private inner class GraphCollector : TierCollector {

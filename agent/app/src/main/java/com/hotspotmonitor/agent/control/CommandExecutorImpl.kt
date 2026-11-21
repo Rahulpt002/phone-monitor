@@ -881,6 +881,15 @@ class CommandExecutorImpl(private val graph: AgentGraph) : CommandExecutor {
                 CapabilityEntry(supported = false, note = "probe failed: ${errorText(e)}")
             }
         }
+        // Not a command: the remote screen (docs/protocol.md section 8). The key "screen" is the
+        // screen on/off command, so this one is "screen_mirror".
+        map[CAP_SCREEN_MIRROR] = try {
+            graph.screen.probe()
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            CapabilityEntry(supported = false, note = "probe failed: ${errorText(e)}")
+        }
         _capabilities.value = map
         persistCapabilities(map)
         log.i(TAG, "Capability probe: ${map.values.count { it.supported }} of ${map.size} commands supported")
@@ -986,6 +995,8 @@ class CommandExecutorImpl(private val graph: AgentGraph) : CommandExecutor {
     private fun errorText(e: Throwable): String = e.message ?: e.javaClass.simpleName
 
     companion object {
+        /** Capability-map key of the remote screen (not a command name). */
+        const val CAP_SCREEN_MIRROR = "screen_mirror"
         private const val TAG = "exec"
         private const val KEY_CAPABILITIES = "control.capabilities"
         private const val KEY_PENDING_REBOOT_ID = "control.pending_reboot_id"

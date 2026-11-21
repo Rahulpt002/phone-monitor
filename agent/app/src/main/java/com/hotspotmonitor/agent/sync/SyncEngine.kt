@@ -7,6 +7,8 @@ import com.hotspotmonitor.agent.core.ConnState
 import com.hotspotmonitor.agent.core.Ids
 import com.hotspotmonitor.agent.core.OutboxStore
 import com.hotspotmonitor.agent.core.SettingsRepo
+import com.hotspotmonitor.agent.protocol.ScreenStartMsg
+import com.hotspotmonitor.agent.protocol.ScreenStopMsg
 import com.hotspotmonitor.agent.protocol.AckMsg
 import com.hotspotmonitor.agent.protocol.AgentToServer
 import com.hotspotmonitor.agent.protocol.BatchMsg
@@ -70,6 +72,10 @@ internal interface SyncHost {
 
     /** Latest Finder live values for the mirror fallback, or null. */
     fun finderLive(): FinderLive?
+
+    /** Remote screen start and stop (graph.screen). */
+    fun onScreenStart(msg: ScreenStartMsg) {}
+    fun onScreenStop(msg: ScreenStopMsg) {}
 }
 
 internal class SyncCredentials(val wsUrl: String, val token: String, val deviceId: String) {
@@ -180,7 +186,7 @@ internal class SyncEngine(
 
     fun sendLive(msg: AgentToServer): Boolean {
         if (msg is BufferedMsg || msg is BatchMsg) {
-            log.w(TAG, "sendLive is for heartbeat, probe and finder_live; ${msg.javaClass.simpleName} must go through the outbox")
+            log.w(TAG, "sendLive is for heartbeat, probe, finder_live and screen_state; ${msg.javaClass.simpleName} must go through the outbox")
             return false
         }
         val session = live ?: return false
@@ -475,6 +481,8 @@ internal class SyncEngine(
                 clock.syncWithServer(msg.serverTime, receivedAtMs)
                 safely("probe_ack") { host.onProbeAck(msg.id) }
             }
+            is ScreenStartMsg -> safely("screen_start") { host.onScreenStart(msg) }
+            is ScreenStopMsg -> safely("screen_stop") { host.onScreenStop(msg) }
             is ErrorMsg -> {
                 session.serverError = msg.code
                 log.w(TAG, "Server error '${msg.code}': ${msg.message.take(MAX_ERROR_CHARS)}")

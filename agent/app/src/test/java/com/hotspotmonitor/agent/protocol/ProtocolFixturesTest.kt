@@ -31,6 +31,7 @@ class ProtocolFixturesTest {
         "heartbeat" to HeartbeatMsg::class,
         "probe" to ProbeMsg::class,
         "finder_live" to FinderLiveMsg::class,
+        "screen_state" to ScreenStateMsg::class,
     )
 
     private val serverTypes: Map<String, KClass<out ServerToAgent>> = mapOf(
@@ -42,6 +43,8 @@ class ProtocolFixturesTest {
         "ack" to AckMsg::class,
         "probe_ack" to ProbeAckMsg::class,
         "error" to ErrorMsg::class,
+        "screen_start" to ScreenStartMsg::class,
+        "screen_stop" to ScreenStopMsg::class,
     )
 
     private fun JsonObject.t(): String = getValue("t").jsonPrimitive.content

@@ -100,3 +100,16 @@ from the Magisk app (Modules -> Install from storage).
 - Files: `files/logs/agent.log` (+ `agent.log.1`), at most 2 x 1 MB. On a debug build:
   `adb shell run-as com.hotspotmonitor.agent cat files/logs/agent.log`.
 - The app's Log screen shows the last 1000 lines.
+
+## Remote screen (scrcpy)
+
+The Dashboard's Screen tab (docs/protocol.md section 8) uses the scrcpy server, bundled as
+`app/src/main/assets/scrcpy/scrcpy-server-5.0.1.jar` (unmodified release build of
+[Genymobile/scrcpy](https://github.com/Genymobile/scrcpy) v5.0.1, Apache License 2.0, see
+`assets/scrcpy/LICENSE`; SHA-256 `764eb6f79811d5211fe9df341120882ba9994c7a61b897d7bf3fb662e53bc536`).
+On `screen_start` the Agent copies it to `/data/local/tmp`, runs it with `app_process` as root,
+connects to its abstract sockets and relays them over `/ws/screen/agent`. The jar version must
+match `ScreenMirrorImpl.SCRCPY_VERSION` exactly (scrcpy checks it). To update scrcpy, replace the
+jar, the version constant and `SCREEN.scrcpy_version` in shared/src/screen.ts together, and check
+the control message layout in `protocol/Screen.kt` against the new ControlMessageReader.
+

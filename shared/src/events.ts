@@ -37,6 +37,9 @@ export type EventKind =
   // Server-generated audit record of PUT /api/settings (never sent by the Agent);
   // data: { user, version, changed: string[] (dotted paths), profile_override_changed: boolean }
   | 'settings_changed'
+  // Server-generated audit record of a remote-screen session (never sent by the Agent);
+  // data: { user, session_id, state: 'started' | 'ended', quality, reason?, duration_s?, bytes? }
+  | 'screen_session'
   // unexpected Agent error; data: { where, message, ... }. where 'charge_control': a path accepted
   // writes but did not stop charging; data.next_path is the path tried next (null if none).
   | 'error';

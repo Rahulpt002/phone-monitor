@@ -162,6 +162,14 @@ export const IconPhone = (p: IconProps) => (
     <path d="M11 18h2" />
   </Svg>
 );
+/** A phone showing a touch: the remote screen. */
+export const IconScreen = (p: IconProps) => (
+  <Svg {...p}>
+    <rect x="6" y="2" width="12" height="20" rx="2" />
+    <circle cx="12" cy="11" r="2.5" />
+    <path d="M12 15.5v2" />
+  </Svg>
+);
 export const IconStar = (p: IconProps) => (
   <Svg {...p}>
     <path d="m12 2 3.1 6.3 6.9 1-5 4.9 1.2 6.8L12 17.8 5.8 21l1.2-6.8-5-4.9 6.9-1z" />

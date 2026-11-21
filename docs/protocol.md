@@ -12,6 +12,7 @@ The TypeScript types in [`shared/src/`](../shared/src) are the source of truth. 
 | `protocol.ts` | WebSocket messages for both sockets |
 | `api.ts` | REST endpoints, request and response bodies, error codes (plan 8.3) |
 | `metrics.ts` | Chart metrics and their JSON paths |
+| `screen.ts` | Remote screen: session types, relay messages, binary video frames, quality presets |
 
 ## 1. General rules
 
@@ -184,3 +185,71 @@ score  = round1(100 * (w_sinr*n_sinr + w_rsrp*n_rsrp + w_rsrq*n_rsrq))   // miss
 | 4004 | dashboard only: the user's role changed, or they turned TOTP off; the session is still valid. Reconnect, re-send `auth`, and refetch `GET /api/auth/me` |
 | 1013 | dashboard only: try again later (session lookup failed or timed out, or no `auth` arrived within 10 s); keep the token and reconnect with backoff |
 | 4003 | protocol error (bad message) |
+| 4005 | screen relay only: no such screen session, or it has ended |
+
+The screen relay sockets (section 8) also use 4001 (bad token, or the viewer is not the admin
+sign-in that started the session) and 4002 (another viewer window opened the same session).
+
+## 8. Remote screen (`screen.ts`)
+
+Live view and control of the phone's screen from the Dashboard. The Agent runs the bundled scrcpy
+server (Apache-2.0, version `SCREEN.scrcpy_version`) as root; video goes over a **separate relay
+socket pair**, so it never competes with telemetry, acks or commands on `/ws/agent`.
+
+```
+Dashboard                        Server                                  Agent
+  | POST /api/screen/sessions      |                                       |
+  |  {device_id, quality,          | admin, password + fresh TOTP code     |
+  |   password, code}              | phone online, capability screen_mirror|
+  |<-- 201 {session_id} -----------|--- screen_start (on /ws/agent) ------>| starts scrcpy as root
+  |                                |<== WS /ws/screen/agent?session=id ====| (device token header)
+  |== WS /ws/screen/view =========>|                                       |
+  |   screen_auth {token, id}      |                                       |
+  |<-- screen_status, screen_meta -|<-- screen_meta ------------------------|
+  |<-- binary video frames --------|<-- binary video frames ---------------|
+  |--- touch / key / text / ... -->|--- (validated) ---------------------->| -> scrcpy control socket
+  |--- screen_stop --------------->|--- screen_stop (on /ws/agent) ------->| stops scrcpy
+```
+
+- **Who:** admins only. Starting needs the admin's password **and** a fresh TOTP code (both count
+  toward the per-session lockout; the code's step is recorded, so it cannot be reused). The viewer
+  socket is bound to the sign-in session that passed the check (`sessionHash`), not just the user.
+- **Checks before the password:** the phone is connected (409 `device_offline`) and reports
+  `capabilities.screen_mirror.supported` (409 `conflict` otherwise), so an offline phone does not
+  burn a code. `screen_mirror` is not a command name: `screen` is the screen on/off command.
+- **One session per phone:** a new one ends the old with reason `replaced`.
+- **Limits (`SCREEN`):** at most `max_duration_s` (30 min) per session; the Agent must connect its
+  relay within `agent_connect_timeout_s` (30 s); the session ends when no viewer has been connected
+  for `viewer_grace_s` (30 s), so a page switch or short network drop survives. The Dashboard drops
+  its socket while the page is hidden and reconnects when it is shown again.
+- **End reasons** (`ScreenEndReason`): `stopped`, `replaced`, `max_duration`, `viewer_gone`,
+  `agent_timeout`, `agent_gone`, `agent_failed`, `session_ended` (sign-in ended or role changed),
+  `unpaired`, `server_shutdown`. The Server sends `screen_stop` to the Agent for every end, and
+  for a `screen_state` about a session it does not know.
+- **Audit:** start and end are stored as Server-generated `screen_session` events (data: user,
+  session_id, state, quality, and for the end reason, duration_s, bytes) and appear in the timeline.
+- **`screen_state`** (Agent → Server on `/ws/agent`, not buffered): `starting`, `streaming`,
+  `ended`, `failed` (with `error`). `failed` ends the session with `agent_failed` and the error.
+- **Video frames** (binary, Agent → Server → viewer, forwarded unchanged): byte 0 is the kind.
+  `1` = START: scrcpy's 12-byte packet header (u64 big-endian pts and flags: bit 62 codec config,
+  bit 61 key frame; then u32 payload size) and the first chunk. `2` = CONT: the next chunk. Frames
+  are at most `max_chunk_bytes` (256 KiB) so a key frame fits under the 512 KiB WebSocket limit.
+  Payloads are H.264 Annex B; config packets (SPS + PPS) come before the first key frame. The
+  Dashboard decodes with WebCodecs (`avc1.PPCCLL` from the SPS) and draws to a canvas.
+- **Backpressure:** the Agent skips delta frames while its relay socket has more than 1 MiB unsent
+  and asks scrcpy for a new key frame (`RESET_VIDEO`). The Server drops video for a viewer whose
+  socket has more than `max_viewer_buffered_bytes` (2 MiB) unsent, waits for the next config or key
+  frame, and asks the Agent for one (`{"t":"keyframe"}`, at most every 2 s). A viewer that joins or
+  reconnects gets video from the next key frame, which the Server requests at once.
+- **Control** (viewer → Server → Agent, JSON): `touch {action: down|move|up|cancel, pointer 0..9,
+  x, y}`, `scroll {x, y, dx, dy}` (−16..16), `key {key}` (`SCREEN_KEYS`), `text {text}` (at most
+  300 UTF-8 bytes), `panel {notifications|settings|collapse}`, `keyframe`. Coordinates are
+  fractions (0..1) of the video frame. The Server validates every message, drops invalid ones and
+  forwards at most 200 per second; the Agent encodes them as scrcpy control messages.
+- **Viewer socket:** first message `screen_auth {token, session_id}` within 10 s; then
+  `screen_status`, `screen_meta`, video frames and `pong` (the client pings every 20 s).
+- **Data:** quality presets cap the bit rate (`low` 0.8, `standard` 2, `high` 4 Mbit/s; a still
+  screen sends far less). Video uses the hotspot's mobile data while a viewer watches.
+- **Samsung quirk:** on the Galaxy M52 (One UI 5.1) the video encoder aborts ("stack corruption
+  detected" in `CCodec::customConfigVideoEncoder`) when the scrcpy process's command line is longer
+  than about 250 bytes, so the Agent keeps it under 220 (defaults are left out).

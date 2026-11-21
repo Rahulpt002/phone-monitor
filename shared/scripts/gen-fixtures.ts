@@ -13,6 +13,8 @@ import {
   type ServerToAgent,
   type FinderSpot,
   type TelemetryMsg,
+  type ScreenControlMsg,
+  type ScreenMetaMsg,
 } from '../src/index.js';
 
 const out = join(dirname(fileURLToPath(import.meta.url)), '..', 'fixtures');
@@ -246,6 +248,8 @@ const agentToServer: AgentToServer[] = [
   { t: 'finder_spot', seq: 105, spot },
   { t: 'finder_spot_deleted', seq: 106, spot_id: 's_old' },
   { t: 'sms', seq: 107, sms: { id: 'm_x1', direction: 'in', peer: 'JX-JIOINF', body: 'Your plan expires in 3 days.', at: '2026-11-19T08:00:00.000Z' } },
+  { t: 'screen_state', session_id: 'scr_4kQ9xT2mBv7wLp3n', state: 'streaming', error: null },
+  { t: 'screen_state', session_id: 'scr_4kQ9xT2mBv7wLp3n', state: 'failed', error: 'scrcpy server did not open its socket' },
 ];
 
 const serverToAgent: ServerToAgent[] = [
@@ -271,7 +275,27 @@ const serverToAgent: ServerToAgent[] = [
   { t: 'ack', seq: 112 },
   { t: 'probe_ack', id: 'p_1', server_time: '2026-11-19T10:20:15.000Z' },
   { t: 'error', code: 'unauthorized', message: 'invalid device token' },
+  {
+    t: 'screen_start', session_id: 'scr_4kQ9xT2mBv7wLp3n', quality: 'standard', max_size: 1280, bit_rate: 2_000_000,
+    max_fps: 24, max_duration_s: 1800, user: 'admin',
+  },
+  { t: 'screen_stop', session_id: 'scr_4kQ9xT2mBv7wLp3n', reason: 'stopped' },
 ];
+
+// Remote-screen relay (/ws/screen/*): control messages the Server forwards to the Agent, and the
+// Agent's geometry message. The Kotlin Agent parses these to prove its control decoder matches.
+const screenControl: ScreenControlMsg[] = [
+  { t: 'touch', action: 'down', pointer: 0, x: 0.5, y: 0.25 },
+  { t: 'touch', action: 'move', pointer: 0, x: 0.52, y: 0.3 },
+  { t: 'touch', action: 'up', pointer: 0, x: 0.52, y: 0.3 },
+  { t: 'scroll', x: 0.5, y: 0.5, dx: 0, dy: 2 },
+  { t: 'key', key: 'back' },
+  { t: 'key', key: 'home' },
+  { t: 'text', text: 'hello 123' },
+  { t: 'panel', panel: 'notifications' },
+  { t: 'keyframe' },
+];
+const screenMeta: ScreenMetaMsg = { t: 'screen_meta', codec: 'h264', width: 576, height: 1280, device_name: 'SM-M526B' };
 
 const scoreInputs: [number | null, number | null, number | null][] = [
   [-80, 25, -8], [-120, -5, -20], [-94, 12.5, -11], [-100, 0, -15], [-70, 30, -3],
@@ -283,4 +307,5 @@ write('agent-to-server.json', agentToServer);
 write('server-to-agent.json', serverToAgent);
 write('settings-default.json', DEFAULT_SETTINGS);
 write('score-cases.json', scoreCases);
+write('screen-relay.json', { control: screenControl, meta: screenMeta });
 console.log('fixtures written to', out);

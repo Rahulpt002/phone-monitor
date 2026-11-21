@@ -314,6 +314,7 @@ export class DeviceService {
     this.devices.delete(dev.id);
     this.ctx.hub.closeAgent(dev.id, 4001, 'unpaired', { t: 'error', code: 'unauthorized', message: 'device unpaired' });
     await this.ctx.commands.expireAllForDevice(dev.id, 'device unpaired');
+    await this.ctx.screen.onUnpaired(dev.id);
     this.ctx.hub.broadcastDevice(dev.id, {
       t: 'status',
       device_id: dev.id,

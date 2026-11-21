@@ -57,6 +57,7 @@ export function handleAgentSocket(ctx: AppContext, socket: WebSocket, req: Fasti
   }
   ctx.log.info({ device_id: dev.id, ip: req.ip }, 'agent connected');
   ctx.commands.deliverQueued(dev.id).catch((err) => ctx.log.error({ err }, 'failed to deliver queued commands'));
+  ctx.screen.onAgentLinkUp(dev.id);
 
   const bad = (reason: string) => {
     conn.badMessages++;
@@ -131,6 +132,9 @@ export function handleAgentSocket(ctx: AppContext, socket: WebSocket, req: Fasti
         if (isPlainObject(msg.live)) {
           ctx.hub.broadcastDevice(dev.id, { t: 'finder_live', device_id: dev.id, live: normalizeFinderLive(msg.live) });
         }
+        return;
+      case 'screen_state':
+        ctx.screen.onAgentState(dev.id, msg).catch((err) => ctx.log.error({ err }, 'screen_state failed'));
         return;
       case 'batch':
         if (!Array.isArray(msg.items)) return bad('batch.items must be an array');

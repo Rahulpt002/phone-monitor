@@ -5,6 +5,7 @@
  * Two sockets:
  *  - WS /ws/agent      Agent <-> Server. Auth: `Authorization: Bearer <device_token>` on upgrade.
  *  - WS /ws/dashboard  Dashboard <-> Server. Auth: first message `{t:"auth", token}`.
+ * Plus the remote-screen relay pair (/ws/screen/agent, /ws/screen/view), see screen.ts.
  *
  * Every message is one JSON object with a `t` (type) field. Unknown `t` values and unknown
  * fields must be ignored by every receiver (forward compatibility).
@@ -14,6 +15,7 @@ import type { AgentEvent } from './events.js';
 import type { FinderLive, FinderSpot } from './finder.js';
 import type { Settings } from './settings.js';
 import type { DeviceInfo, TelemetryGroups, TelemetryTier } from './telemetry.js';
+import type { ScreenStartMsg, ScreenStateMsg, ScreenStopMsg } from './screen.js';
 
 // ---------------------------------------------------------------------------------------------
 // Agent -> Server
@@ -152,7 +154,8 @@ export type AgentToServer =
   | BatchMsg
   | HeartbeatMsg
   | ProbeMsg
-  | FinderLiveMsg;
+  | FinderLiveMsg
+  | ScreenStateMsg;
 
 // ---------------------------------------------------------------------------------------------
 // Server -> Agent
@@ -225,7 +228,9 @@ export type ServerToAgent =
   | CmdKeepMsg
   | AckMsg
   | ProbeAckMsg
-  | ErrorMsg;
+  | ErrorMsg
+  | ScreenStartMsg
+  | ScreenStopMsg;
 
 // ---------------------------------------------------------------------------------------------
 // Dashboard <-> Server

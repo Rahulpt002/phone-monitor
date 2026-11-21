@@ -12,6 +12,7 @@ import com.hotspotmonitor.agent.finder.FinderEngineImpl
 import com.hotspotmonitor.agent.protocol.EventKind
 import com.hotspotmonitor.agent.protocol.Severity
 import com.hotspotmonitor.agent.protocol.jsonObjectOf
+import com.hotspotmonitor.agent.screen.ScreenMirrorImpl
 import com.hotspotmonitor.agent.root.AssetProfileSource
 import com.hotspotmonitor.agent.root.LibsuRootShell
 import com.hotspotmonitor.agent.root.ProfileRepo
@@ -114,6 +115,7 @@ class AgentGraph(context: Context) {
     val watchdog: Watchdog by lazy { WatchdogImpl(this) }
     val finder: FinderEngine by lazy { FinderEngineImpl(this) }
     val sync: SyncClient by lazy { SyncClientImpl(this) }
+    val screen: ScreenMirror by lazy { ScreenMirrorImpl(this) }
 
     /** Pairing over HTTP (PairActivity, PairingScreen). Persistent state is [pairingState]. */
     val pairing: PairingClient by lazy { PairingClientImpl(this) }
@@ -197,6 +199,7 @@ class AgentGraph(context: Context) {
         "commands" to commands,
         "watchdog" to watchdog,
         "finder" to finder,
+        "screen" to screen,
         "sync" to sync,
     )
 

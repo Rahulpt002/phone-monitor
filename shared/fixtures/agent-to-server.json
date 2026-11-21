@@ -566,5 +566,17 @@
       "body": "Your plan expires in 3 days.",
       "at": "2026-11-19T08:00:00.000Z"
     }
+  },
+  {
+    "t": "screen_state",
+    "session_id": "scr_4kQ9xT2mBv7wLp3n",
+    "state": "streaming",
+    "error": null
+  },
+  {
+    "t": "screen_state",
+    "session_id": "scr_4kQ9xT2mBv7wLp3n",
+    "state": "failed",
+    "error": "scrcpy server did not open its socket"
   }
 ]

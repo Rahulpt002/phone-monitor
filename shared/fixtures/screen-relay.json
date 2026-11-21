@@ -1,0 +1,58 @@
+{
+  "control": [
+    {
+      "t": "touch",
+      "action": "down",
+      "pointer": 0,
+      "x": 0.5,
+      "y": 0.25
+    },
+    {
+      "t": "touch",
+      "action": "move",
+      "pointer": 0,
+      "x": 0.52,
+      "y": 0.3
+    },
+    {
+      "t": "touch",
+      "action": "up",
+      "pointer": 0,
+      "x": 0.52,
+      "y": 0.3
+    },
+    {
+      "t": "scroll",
+      "x": 0.5,
+      "y": 0.5,
+      "dx": 0,
+      "dy": 2
+    },
+    {
+      "t": "key",
+      "key": "back"
+    },
+    {
+      "t": "key",
+      "key": "home"
+    },
+    {
+      "t": "text",
+      "text": "hello 123"
+    },
+    {
+      "t": "panel",
+      "panel": "notifications"
+    },
+    {
+      "t": "keyframe"
+    }
+  ],
+  "meta": {
+    "t": "screen_meta",
+    "codec": "h264",
+    "width": 576,
+    "height": 1280,
+    "device_name": "SM-M526B"
+  }
+}

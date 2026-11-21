@@ -23,6 +23,7 @@ const ControlsScreen = lazyScreen(() => import('./screens/Controls'), (m) => m.C
 const SystemScreen = lazyScreen(() => import('./screens/System'), (m) => m.SystemScreen);
 const FinderScreen = lazyScreen(() => import('./screens/Finder'), (m) => m.FinderScreen);
 const MessagesScreen = lazyScreen(() => import('./screens/Messages'), (m) => m.MessagesScreen);
+const ScreenScreen = lazyScreen(() => import('./screens/Screen'), (m) => m.ScreenScreen);
 const AlertsScreen = lazyScreen(() => import('./screens/Alerts'), (m) => m.AlertsScreen);
 const SettingsScreen = lazyScreen(() => import('./screens/Settings'), (m) => m.SettingsScreen);
 const EnrollScreen = lazyScreen(() => import('./screens/Enroll'), (m) => m.EnrollScreen);
@@ -115,6 +116,14 @@ export function AppRoutes() {
           element={
             <AdminOnly>
               <ControlsScreen />
+            </AdminOnly>
+          }
+        />
+        <Route
+          path="screen"
+          element={
+            <AdminOnly>
+              <ScreenScreen />
             </AdminOnly>
           }
         />

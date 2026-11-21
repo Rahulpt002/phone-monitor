@@ -7,6 +7,7 @@ import {
   IconNetwork,
   IconOverview,
   IconPower,
+  IconScreen,
   IconSettings,
   IconSignal,
   IconSystem,
@@ -17,7 +18,7 @@ export interface NavItem {
   label: string;
   short?: string;
   icon: ComponentType<SVGProps<SVGSVGElement>>;
-  /** Plan 9: viewers see everything except Controls, root shell and Messages. */
+  /** Plan 9: viewers see everything except Controls, Screen, root shell and Messages. */
   adminOnly?: boolean;
 }
 
@@ -27,6 +28,7 @@ export const NAV: NavItem[] = [
   { to: '/network', label: 'Network', icon: IconNetwork },
   { to: '/power', label: 'Power and heat', short: 'Power', icon: IconPower },
   { to: '/controls', label: 'Controls', icon: IconControls, adminOnly: true },
+  { to: '/screen', label: 'Screen', icon: IconScreen, adminOnly: true },
   { to: '/system', label: 'System', icon: IconSystem },
   { to: '/finder', label: 'Signal Finder', short: 'Finder', icon: IconFinder },
   { to: '/messages', label: 'Messages', icon: IconMessages, adminOnly: true },
@@ -40,6 +42,7 @@ export function navFor(isAdmin: boolean): NavItem[] {
 
 /** The four tabs on the phone's bottom bar; everything else is under "More". */
 export function bottomTabs(isAdmin: boolean): NavItem[] {
-  const pick = isAdmin ? ['/', '/signal', '/finder', '/controls'] : ['/', '/signal', '/finder', '/network'];
+  // Admins get the remote screen on the bar (Finder moves to More): it is the phone-first tool.
+  const pick = isAdmin ? ['/', '/signal', '/screen', '/controls'] : ['/', '/signal', '/finder', '/network'];
   return pick.map((p) => NAV.find((n) => n.to === p)!).filter(Boolean);
 }

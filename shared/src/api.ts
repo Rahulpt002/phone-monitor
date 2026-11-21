@@ -16,6 +16,7 @@ import type { FinderSpot } from './finder.js';
 import type { AlertRecord, DeviceSnapshot, DeviceSummary, Role, SmsRecord, UserInfo } from './protocol.js';
 import type { Settings } from './settings.js';
 import type { DeviceInfo } from './telemetry.js';
+import type { ScreenQuality } from './screen.js';
 
 export type ApiErrorCode =
   | 'bad_request'
@@ -234,4 +235,27 @@ export interface PublicConfig {
   version: string;
   telegram_configured: boolean;
   push_configured: boolean;
+}
+
+// --- remote screen (screen.ts, docs/protocol.md section 8) -------------------------------------
+// POST /screen/sessions (admin, reauth: password + a fresh TOTP code) -> 201 ScreenSessionResponse
+//   401 reauth_required (password missing or wrong), 400 bad_request (code wrong or already used),
+//   409 device_offline (the Agent is not connected), 409 conflict (the phone cannot stream:
+//   capability screen_mirror not supported). A new session for the same phone ends the old one.
+// DELETE /screen/sessions/:id (admin, own session or any admin) -> 204
+export interface CreateScreenSessionRequest {
+  device_id: string;
+  quality?: ScreenQuality; // default 'standard'
+  password: string;
+  code: string; // 6-digit TOTP code
+}
+
+export interface ScreenSessionResponse {
+  session_id: string;
+  device_id: string;
+  quality: ScreenQuality;
+  created_at: string;
+  expires_at: string; // created_at + SCREEN.max_duration_s
+  /** Path of the viewer socket; derive the ws(s) URL from the API base. */
+  ws_path: '/ws/screen/view';
 }

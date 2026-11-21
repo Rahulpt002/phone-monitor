@@ -259,5 +259,20 @@
     "t": "error",
     "code": "unauthorized",
     "message": "invalid device token"
+  },
+  {
+    "t": "screen_start",
+    "session_id": "scr_4kQ9xT2mBv7wLp3n",
+    "quality": "standard",
+    "max_size": 1280,
+    "bit_rate": 2000000,
+    "max_fps": 24,
+    "max_duration_s": 1800,
+    "user": "admin"
+  },
+  {
+    "t": "screen_stop",
+    "session_id": "scr_4kQ9xT2mBv7wLp3n",
+    "reason": "stopped"
   }
 ]

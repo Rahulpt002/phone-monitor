@@ -8,6 +8,7 @@ import type {
   ApiErrorCode,
   CommandRecord,
   CommandsResponse,
+  CreateScreenSessionRequest,
   CreateUserRequest,
   DeleteUserRequest,
   DeviceSnapshot,
@@ -20,6 +21,7 @@ import type {
   PairCodeResponse,
   PublicConfig,
   PutSettingsRequest,
+  ScreenSessionResponse,
   SendCommandRequest,
   SessionResponse,
   SettingsResponse,
@@ -277,6 +279,10 @@ export const api = {
 
   // messages
   sms: (q: { device_id?: string | null; limit?: number }, signal?: AbortSignal) => get<SmsResponse>('/sms', q, signal),
+
+  // remote screen (admin; password + a fresh TOTP code)
+  createScreenSession: (body: CreateScreenSessionRequest) => send<ScreenSessionResponse>('POST', '/screen/sessions', body),
+  stopScreenSession: (id: string) => send<void>('DELETE', `/screen/sessions/${encodeURIComponent(id)}`),
 
   // misc
   config: () => request<PublicConfig>('GET', '/config', { auth: false }),

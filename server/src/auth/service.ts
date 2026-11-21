@@ -430,6 +430,30 @@ export class AuthService {
     this.guard.succeed(keys);
   }
 
+  /**
+   * Password plus a fresh TOTP code, for the most sensitive actions (remote screen control).
+   * Both count toward the session's lockout; the code's step is recorded so it cannot be reused.
+   */
+  async reauthWithCode(auth: AuthInfo, password: unknown, code: unknown): Promise<void> {
+    const { user } = auth;
+    await this.reauth(auth, password);
+    if (!user.totp_secret) throw new ApiHttpError(403, 'totp_enrollment_required', 'Set up two-factor authentication first');
+    const keys = this.sessionKeys(auth);
+    this.assertNotLocked(keys);
+    const now = this.ctx.clock.now();
+    const step =
+      typeof code === 'string' && /^\d{6}$/.test(code.trim())
+        ? verifyTotp(user.totp_secret, code.trim(), now, user.totp_last_step)
+        : null;
+    if (step === null) {
+      this.guard.fail(keys);
+      throw badRequest('Wrong or already used code. Wait for the next code and try again.');
+    }
+    user.totp_last_step = step;
+    await this.ctx.db.run('UPDATE users SET totp_last_step = ? WHERE id = ?', [step, user.id]);
+    this.guard.succeed(keys);
+  }
+
   async totpSetup(user: UserRow): Promise<TotpSetupResponse> {
     if (user.totp_secret) throw conflict('TOTP is already enabled. Disable it first to enroll a new authenticator.');
     const secret = generateTotpSecret();

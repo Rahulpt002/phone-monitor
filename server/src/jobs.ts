@@ -12,7 +12,7 @@ interface Job {
 
 /**
  * Background work on one timer:
- * - every 5 s: command expiry, pending "back online" alerts
+ * - every 5 s: command expiry, pending "back online" alerts, remote-screen time limits
  * - every 15 s: offline detection and time-based alert conditions
  * - every 30 s: persist device state (last_seen, merged state, alert timers), ping sockets
  * - every 60 s: 1-minute rollups, close Dashboard sockets whose session expired
@@ -27,6 +27,7 @@ export class Jobs {
     this.jobs = [
       { name: 'commands.expire', everyMs: 5_000, run: () => ctx.commands.expireDue(), lastRun: 0 },
       { name: 'alerts.backOnline', everyMs: 5_000, run: () => ctx.alerts.processPendingBackOnline(), lastRun: 0 },
+      { name: 'screen.tick', everyMs: 5_000, run: () => ctx.screen.tick(), lastRun: 0 },
       { name: 'alerts.tick', everyMs: 15_000, run: () => ctx.alerts.tick(), lastRun: 0 },
       { name: 'devices.flush', everyMs: 30_000, run: () => ctx.devices.flush(), lastRun: 0 },
       { name: 'sockets.ping', everyMs: 30_000, run: async () => ctx.hub.pingAll(), lastRun: 0 },
