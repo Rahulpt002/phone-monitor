@@ -9,6 +9,7 @@ use through `settings.profile_override`.
 |------|--------|
 | [`generic.json`](../agent/app/src/main/assets/profiles/generic.json) | Fallback for any phone without its own profile |
 | [`samsung_galaxy_s.json`](../agent/app/src/main/assets/profiles/samsung_galaxy_s.json) | Galaxy S10, S20, S21 families (`SM-G97x`, `SM-G98x`, `SM-G99x`) |
+| [`samsung_galaxy_m52.json`](../agent/app/src/main/assets/profiles/samsung_galaxy_m52.json) | Galaxy M52 5G (`SM-M526B`), from Phase 0 on the hotspot phone |
 | [`google_pixel.json`](../agent/app/src/main/assets/profiles/google_pixel.json) | Google Pixel |
 | [`oneplus.json`](../agent/app/src/main/assets/profiles/oneplus.json) | OnePlus (manufacturer-only match) |
 

@@ -1,0 +1,30 @@
+{
+  "id": "samsung_galaxy_m52",
+  "name": "Samsung Galaxy M52 5G",
+  "match": { "manufacturer": ["samsung"], "model_regex": "^SM-M526B" },
+  "charge_control": [
+    { "path": "/sys/class/power_supply/battery/batt_slate_mode", "on": "0", "off": "1", "note": "Verified on SM-M526B (phase0.sh charge-discover --test, 2026-11-21): 1 cuts USB input (plug shows none), so the phone runs from the battery (about -217 mA) until it is set back to 0." },
+    { "path": "/sys/class/power_supply/battery/batt_full_capacity", "on": "100", "off": "5", "note": "One UI 'Protect battery' cap in percent; writable on SM-M526B. Uncertain: verify." },
+    { "path": "/sys/class/power_supply/battery/store_mode", "on": "0", "off": "1", "note": "Retail demo mode: pauses charging only above about 70% and resumes near 60%. Last resort. Uncertain: verify." }
+  ],
+  "current_now": { "unit": "mA", "sign": 1 },
+  "usb_function": "rndis",
+  "autoboot": {
+    "method": "magisk_autoboot",
+    "note": "Not proven yet on SM-M526B: no auto-boot module installed. Run phase0.sh autoboot --test once one is."
+  },
+  "thermal": {
+    "cpu": ["cpu"],
+    "modem": ["mdmss", "modem-lte"],
+    "skin": ["skin", "quiet", "xo-therm"],
+    "battery": ["battery"]
+  },
+  "notes": [
+    "Galaxy M52 5G (m52xq, Snapdragon 778G 'lahaina'), launched with Android 11; tested on Android 13 / One UI 5.1, build M526BXXS7CYD2. Magisk sits in the boot image, so root survives a reboot (Phase 0 PASS).",
+    "current_now: milliamps, negative while discharging (-217 with USB input cut, -10 when full on USB). Confirm with phase0.sh current-sign.",
+    "Thermal: the modem-mmw* zones read a constant 2 C (the M52 has no mmWave), so modem uses mdmss and modem-lte only. xo-therm, quiet-therm and sdm-skin-therm read n/a; modem-skin-usr is the working skin zone.",
+    "Keep automatic updates off and stay on One UI 7 or older: One UI 8 removed bootloader unlocking. Samsung's update clients (com.wssyncmldm, com.sec.android.soagent) are removed on the test phone.",
+    "One UI stops background apps aggressively: set the Agent to Unrestricted battery use and add it to 'Never sleeping apps' (the hsm-keepalive module also whitelists it from Doze).",
+    "Dial *#0011# for the service menu (band and signal) to cross-check the Signal Finder."
+  ]
+}

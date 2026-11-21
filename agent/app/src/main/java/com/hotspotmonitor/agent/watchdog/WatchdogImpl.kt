@@ -430,11 +430,15 @@ class WatchdogImpl(private val graph: AgentGraph) : Watchdog {
     private fun powerRule(s: WatchdogSettings, now: Long) {
         val power = graph.telemetry.power.value ?: return
         val plugged = power.plug != null && power.plug != PlugType.NONE
+        val chargingAllowed = graph.charge.state.value.chargingEnabled != false
         if (lastPlugged == true && !plugged) {
-            graph.log.w(TAG, "USB power lost (battery ${power.percent ?: "?"} %); telemetry reports power_lost")
+            if (chargingAllowed) {
+                graph.log.w(TAG, "USB power lost (battery ${power.percent ?: "?"} %); telemetry reports power_lost")
+            } else {
+                graph.log.i(TAG, "Plug shows none while charging is switched off (the charge switch may cut USB input)")
+            }
         }
         lastPlugged = plugged
-        val chargingAllowed = graph.charge.state.value.chargingEnabled != false
         val alert = weakPower.observe(now, plugged, chargingAllowed, power.percent, power.currentMa, s.weakPowerMin) ?: return
         graph.events.emit(
             EventKind.WEAK_POWER, Severity.WARNING,
