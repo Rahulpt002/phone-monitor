@@ -73,6 +73,16 @@ not end in U, U1 or W, and the software is One UI 7 or older (`phase0.sh info`).
    CSC = CSC file (not HOME_CSC: a wipe is needed on first root). Start.
 6. After the flash, follow the Magisk documentation for Samsung (factory reset from stock
    recovery on first root, then boot and open the Magisk app).
+7. Open the Magisk app. If it says "Requires additional setup", tap OK: the phone reboots once.
+
+**Done on a Galaxy M52 5G (SM-M526B, One UI 5.1) from macOS, without Odin:** only `boot` and
+`vbmeta` need flashing. Extract `boot.img.lz4` and `vbmeta.img.lz4` from the AP file, put just
+those two in a tar and patch that tar in Magisk. On macOS build it with
+`tar --no-mac-metadata --no-xattrs --format ustar -cf AP_boot_vbmeta.tar boot.img.lz4 vbmeta.img.lz4`:
+macOS `._` metadata files in the tar make Magisk fail with "Process error". Unpack the patched tar,
+then flash in Download mode with Heimdall 2.1 (grimler's fork):
+`heimdall flash --BOOT boot.img --VBMETA vbmeta.img` (`lz4 -d` the files first). Keep the stock
+`boot.img` and `vbmeta.img` as a way back. The first boot lands in recovery: factory reset there.
 
 **Warning, Galaxy S10 family (launched with Android 9):** there is no ramdisk in the boot image,
 so Magisk is installed into the recovery partition and root is only active when the phone boots
@@ -83,10 +93,23 @@ and decides it for an S10; prefer a Galaxy S20 or S21 (docs/phase0.md section 2.
 **Verify:**
 
 ```sh
-adb shell su -c id                       # uid=0(root). Grant "Shell" in Magisk the first time.
+adb shell su -c id                       # uid=0(root); see "Granting root" below if it is refused
 tools/phase0/phase0.sh root --reboot     # root must survive a reboot
 tools/phase0/phase0.sh root --cold-boot  # and a start from fully off (you press power)
 ```
+
+**Granting root (Magisk 29 and newer, tested with 31.1):** Magisk no longer shows a pop-up when
+an app or the shell asks for root, so `su` is simply refused at first. Grant it in the Magisk app:
+Superuser tab, **+**, tick the app (and "Shell" for adb). On a phone with a dead screen, do it
+through scrcpy, or write the policy directly (as root; `2` = allow, `0` = forever):
+
+```sh
+UID_=$(adb shell pm list packages -U com.hotspotmonitor.agent | sed -n 's/.*uid:\([0-9]*\).*/\1/p')
+printf 'magisk --sqlite "REPLACE INTO policies (uid,policy,until,logging,notification) VALUES(%s,2,0,1,1)"\n' "$UID_" | adb shell su
+```
+
+(Feeding the command to `su` on stdin avoids the nested quoting that `adb shell su -c "..."` gets
+wrong.) Shell itself is uid 2000. Magisk 31 also dropped app hiding (repackaging).
 
 ### 2.2 Remove the screen lock and the SIM PIN
 
@@ -217,12 +240,13 @@ adb shell am start -n com.hotspotmonitor.agent/.ui.MainActivity
 `-g` grants every runtime permission the Agent requests. Installing with `adb install` also
 whitelists the restricted SMS permissions; an APK installed from a file manager cannot get them.
 
-On first start the Agent asks for root: grant it **permanently** in Magisk or KernelSU. With root
+On first start the Agent asks for root: grant it **permanently** in Magisk or KernelSU (Magisk 29
+and newer show no pop-up: add the Agent in the Superuser tab, see "Granting root" in 2.1). With root
 the Agent grants itself background location, usage access, unrestricted background use and the
 battery-optimisation exemption, so later boots need no taps.
 
-Phone with a dead screen and Magisk: grant root without tapping (Magisk 24 to 28; if the command
-fails, tap Grant through scrcpy instead):
+Phone with a dead screen and Magisk: grant root without tapping (Magisk 24 and newer, tested
+with 31.1; if the command fails, use the Superuser tab through scrcpy instead):
 
 ```sh
 AGENT_UID=$(adb shell dumpsys package com.hotspotmonitor.agent | sed -n 's/.*userId=\([0-9]*\).*/\1/p' | head -n 1)
@@ -270,7 +294,7 @@ app-ops, "Stay awake" handling, log size. Pause the restarts while debugging wit
 
 | Permission or setting | Agent (with root) | hsm-keepalive at every boot | By hand (no root, or to check) |
 |-----------------------|-------------------|-----------------------------|--------------------------------|
-| Root, permanently | asks once | | Magisk / KernelSU: Grant, Forever (or section 3 command) |
+| Root, permanently | asks once (no pop-up on Magisk 29+) | | Magisk Superuser tab (+) or Grant, Forever; KernelSU Superuser list (or section 3 command) |
 | Location, "Allow all the time" | yes | `pm grant` fine, coarse, background | App info, Permissions, Location, Allow all the time |
 | Phone (state, USSD) | yes | `pm grant` READ_PHONE_STATE, CALL_PHONE | App info, Permissions, Phone |
 | SMS (optional) | yes | `pm grant` SEND/RECEIVE/READ_SMS (`GRANT_SMS=0` to skip) | App info, Permissions, SMS |
