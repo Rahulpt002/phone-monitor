@@ -48,6 +48,7 @@ The Server creates its tables on first start (migrations run automatically).
    | `PUBLIC_URL` | leave empty (Render's `RENDER_EXTERNAL_URL` is used); set it only for a custom domain |
    | `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID` | optional, see 1.4; can be added later |
    | `VAPID_PUBLIC_KEY`, `VAPID_PRIVATE_KEY`, `VAPID_SUBJECT` | optional, see 1.5 |
+   | `FIREBASE_SERVICE_ACCOUNT` | optional: push to the Android app (service account key JSON or base64), see mobile/README.md |
    | `CORS_ORIGINS` | leave empty unless the Dashboard is hosted elsewhere (section 3) |
 
 5. **Apply**. The build runs `npm ci && npm run build` from the repository root (Dashboard, then Server) on Node 22 (`NODE_VERSION`), and starts `npm start` (`node server/dist/index.js`). Render checks `GET /healthz`.
@@ -248,6 +249,7 @@ All variables are documented with examples in [`deploy/.env.example`](../deploy/
 | `SESSION_TTL_DAYS` | `30` | Dashboard session lifetime |
 | `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID` | none | Telegram alerts |
 | `VAPID_PUBLIC_KEY`, `VAPID_PRIVATE_KEY`, `VAPID_SUBJECT` | generated and stored | Web Push |
+| `FIREBASE_SERVICE_ACCOUNT` | none (off) | Firebase service account key for push to the Android app ([mobile/README.md](../mobile/README.md)) |
 | `CORS_ORIGINS` | none | Extra browser origins for the API |
 | `WEB_DIST` | `<repo>/web/dist` | Built Dashboard |
 | `LOG_LEVEL` | `info` | Log verbosity |

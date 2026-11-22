@@ -383,6 +383,10 @@ export class AuthService {
         sql: 'DELETE FROM push_subscriptions WHERE session_hash = ? OR (user_id = ? AND session_hash IS NULL)',
         args: [sessionHash, auth.user.id],
       },
+      {
+        sql: 'DELETE FROM fcm_tokens WHERE session_hash = ? OR (user_id = ? AND session_hash IS NULL)',
+        args: [sessionHash, auth.user.id],
+      },
     ]);
     this.ctx.hub.closeDashboards((c) => c.sessionHash === sessionHash, 'signed out');
   }
@@ -403,12 +407,17 @@ export class AuthService {
           sql: 'DELETE FROM push_subscriptions WHERE user_id = ? AND (session_hash IS NULL OR session_hash <> ?)',
           args: [userId, exceptHash],
         },
+        {
+          sql: 'DELETE FROM fcm_tokens WHERE user_id = ? AND (session_hash IS NULL OR session_hash <> ?)',
+          args: [userId, exceptHash],
+        },
       ]);
     } else {
       await this.ctx.db.batch([
         { sql: 'DELETE FROM known_devices WHERE user_id = ?', args: [userId] },
         { sql: 'DELETE FROM sessions WHERE user_id = ?', args: [userId] },
         { sql: 'DELETE FROM push_subscriptions WHERE user_id = ?', args: [userId] },
+        { sql: 'DELETE FROM fcm_tokens WHERE user_id = ?', args: [userId] },
       ]);
     }
     this.ctx.hub.closeDashboards((c) => c.user?.id === userId && c.sessionHash !== exceptHash, 'session revoked');
@@ -623,6 +632,7 @@ export class AuthService {
     await this.ctx.db.batch([
       { sql: 'DELETE FROM sessions WHERE user_id = ?', args: [id] },
       { sql: 'DELETE FROM push_subscriptions WHERE user_id = ?', args: [id] },
+      { sql: 'DELETE FROM fcm_tokens WHERE user_id = ?', args: [id] },
       { sql: 'DELETE FROM known_devices WHERE user_id = ?', args: [id] },
       { sql: 'DELETE FROM users WHERE id = ?', args: [id] },
     ]);
@@ -640,6 +650,9 @@ export class AuthService {
       // Subscriptions of sessions that expired or were deleted (F04).
       {
         sql: 'DELETE FROM push_subscriptions WHERE session_hash IS NOT NULL AND session_hash NOT IN (SELECT token_hash FROM sessions)',
+      },
+      {
+        sql: 'DELETE FROM fcm_tokens WHERE session_hash IS NOT NULL AND session_hash NOT IN (SELECT token_hash FROM sessions)',
       },
     ]);
     for (const [h, s] of this.sessions) if (s.expiresAt <= now) this.sessions.delete(h);

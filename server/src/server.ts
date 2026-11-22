@@ -12,6 +12,7 @@ import { Db } from './db/client.js';
 import { migrate } from './db/migrations.js';
 import { ApiHttpError } from './errors.js';
 import { Jobs } from './jobs.js';
+import { FcmService } from './notify/fcm.js';
 import { PushService, type PushSender } from './notify/push.js';
 import { TelegramNotifier, type FetchFn } from './notify/telegram.js';
 import { registerAlertRoutes } from './routes/alerts.js';
@@ -142,6 +143,7 @@ export async function buildServer(config: Config, options: BuildOptions = {}): P
   ctx.alerts = new AlertService(ctx);
   ctx.telegram = new TelegramNotifier(config.telegramBotToken, config.telegramChatId, app.log, options.fetch);
   ctx.push = new PushService(ctx, options.pushSender);
+  ctx.fcm = new FcmService(ctx, options.fetch);
   ctx.screen = new ScreenService(ctx);
 
   // Rebuild all state from the database: after a free-tier spin-down this is all there is.

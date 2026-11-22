@@ -34,6 +34,18 @@ export function registerAlertRoutes(app: FastifyInstance, ctx: AppContext, g: Gu
     return reply.code(204).send();
   });
 
+  // Native Android app (Firebase Cloud Messaging), tied to the signed-in session.
+  app.post('/push/fcm/register', { preHandler: g.user }, async (req, reply) => {
+    const a = authOf(req);
+    await ctx.fcm.register(a.user.id, a.sessionHash, req.body);
+    return reply.code(204).send();
+  });
+
+  app.post('/push/fcm/unregister', { preHandler: g.user }, async (req, reply) => {
+    await ctx.fcm.unregister(authOf(req).user.id, req.body);
+    return reply.code(204).send();
+  });
+
   app.post('/push/unsubscribe', { preHandler: g.user }, async (req, reply) => {
     const b = parseOrThrow(UnsubscribeSchema, req.body, 'request');
     await ctx.push.unsubscribe(b.endpoint);

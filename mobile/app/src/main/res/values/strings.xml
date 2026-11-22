@@ -1,7 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
     <string name="app_name">Hotspot Monitor</string>
-    <string name="shortcut_screen">Screen</string>
-    <string name="shortcut_controls">Controls</string>
-    <string name="shortcut_alerts">Alerts</string>
+    <string name="channel_alerts">Alerts</string>
+    <string name="channel_alerts_desc">Alerts about the hotspot phone (offline, battery, heat, signal, data)</string>
 </resources>

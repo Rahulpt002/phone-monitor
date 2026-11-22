@@ -2,6 +2,7 @@ import type { FastifyBaseLogger } from 'fastify';
 import type { AuthService } from './auth/service.js';
 import type { Config } from './config.js';
 import type { Db } from './db/client.js';
+import type { FcmService } from './notify/fcm.js';
 import type { PushService } from './notify/push.js';
 import type { TelegramNotifier } from './notify/telegram.js';
 import type { AlertService } from './services/alerts.js';
@@ -36,6 +37,7 @@ export interface AppContext {
   alerts: AlertService;
   telegram: TelegramNotifier;
   push: PushService;
+  fcm: FcmService;
   screen: ScreenService;
   hub: Hub;
 }

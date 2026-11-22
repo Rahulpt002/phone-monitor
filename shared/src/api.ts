@@ -222,6 +222,8 @@ export interface FinderSpotsResponse {
 // GET /push/vapid -> { public_key } (public key for PushManager.subscribe)
 // POST /push/subscribe { subscription: PushSubscriptionJSON } -> 204
 // POST /push/unsubscribe { endpoint } -> 204
+// POST /push/fcm/register { token, platform? } -> 204   (native app; per signed-in session)
+// POST /push/fcm/unregister { token } -> 204
 export type AlertsResponse = AlertRecord[];
 
 // --- messages ---------------------------------------------------------------------------------
@@ -235,6 +237,8 @@ export interface PublicConfig {
   version: string;
   telegram_configured: boolean;
   push_configured: boolean;
+  /** Firebase Cloud Messaging for the native Android app (FIREBASE_SERVICE_ACCOUNT). */
+  fcm_configured: boolean;
 }
 
 // --- remote screen (screen.ts, docs/protocol.md section 8) -------------------------------------

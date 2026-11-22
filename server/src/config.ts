@@ -28,6 +28,8 @@ export interface Config {
   vapidPublicKey: string | null;
   vapidPrivateKey: string | null;
   vapidSubject: string | null;
+  /** Firebase service account key (JSON or base64 JSON) for FCM push to the Android app. */
+  firebaseServiceAccount: string | null;
   corsOrigins: string[];
   webDist: string;
   logLevel: LogLevel;
@@ -91,6 +93,7 @@ const EnvSchema = z.object({
   VAPID_SUBJECT: opt.refine((v) => v === undefined || /^(mailto:|https:\/\/)/i.test(v), {
     message: 'VAPID_SUBJECT must start with mailto: or https://',
   }),
+  FIREBASE_SERVICE_ACCOUNT: opt,
   CORS_ORIGINS: opt,
   WEB_DIST: opt,
   LOG_LEVEL: z.preprocess(blank, z.enum(['fatal', 'error', 'warn', 'info', 'debug', 'trace', 'silent']).optional()),
@@ -182,6 +185,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     vapidPublicKey: e.VAPID_PUBLIC_KEY ?? null,
     vapidPrivateKey: e.VAPID_PRIVATE_KEY ?? null,
     vapidSubject: e.VAPID_SUBJECT ?? null,
+    firebaseServiceAccount: e.FIREBASE_SERVICE_ACCOUNT ?? null,
     corsOrigins,
     webDist: e.WEB_DIST ? resolve(e.WEB_DIST) : resolve(REPO_DIR, 'web', 'dist'),
     logLevel: e.LOG_LEVEL ?? 'info',

@@ -202,7 +202,7 @@ describe('auth API', () => {
     const h = await api(server, 'GET', '/healthz');
     expect(h.body).toMatchObject({ ok: true, version: 'test', db: 'ok' });
     const c = await api(server, 'GET', '/api/config');
-    expect(c.body).toEqual({ version: 'test', telegram_configured: false, push_configured: true });
+    expect(c.body).toEqual({ version: 'test', telegram_configured: false, push_configured: true, fcm_configured: false });
     const nf = await api(server, 'GET', '/api/nope');
     expect(nf.status).toBe(404);
     expect(nf.body.error).toBe('not_found');

@@ -42,6 +42,7 @@ export function testConfig(overrides: Partial<Config> = {}): Config {
     vapidPublicKey: null,
     vapidPrivateKey: null,
     vapidSubject: null,
+    firebaseServiceAccount: null,
     corsOrigins: [],
     webDist: '/nonexistent/web/dist',
     logLevel: 'silent',

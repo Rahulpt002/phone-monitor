@@ -33,3 +33,4 @@ mobile/local.properties
 mobile/keystore.properties
 mobile/.idea/
 mobile/.kotlin/
+mobile/firebase.properties

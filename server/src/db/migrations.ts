@@ -202,6 +202,22 @@ const MIGRATIONS: { version: number; statements: string[] }[] = [
       `CREATE INDEX known_devices_user ON known_devices(user_id)`,
     ],
   },
+  {
+    // FCM registration tokens of the native Android app (notify/fcm.ts), per signed-in session
+    // like push_subscriptions.
+    version: 5,
+    statements: [
+      `CREATE TABLE fcm_tokens (
+        token TEXT PRIMARY KEY,
+        user_id INTEGER NOT NULL,
+        session_hash TEXT,
+        platform TEXT,
+        created_at INTEGER NOT NULL
+      )`,
+      `CREATE INDEX fcm_tokens_user ON fcm_tokens(user_id)`,
+      `CREATE INDEX fcm_tokens_session ON fcm_tokens(session_hash)`,
+    ],
+  },
 ];
 
 function scrubSecretArgsStatements(): string[] {

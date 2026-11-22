@@ -279,13 +279,16 @@ export class AlertService {
 
     const useTelegram = (input.force || settings.alerts.channels.telegram) && this.ctx.telegram.configured;
     const usePush = (input.force || settings.alerts.channels.push) && this.ctx.push.configured;
-    const [tg, pushed] = await Promise.all([
+    // The Android app's push (FCM) follows the same "push" channel switch as Web Push.
+    const useFcm = (input.force || settings.alerts.channels.push) && this.ctx.fcm.configured;
+    const [tg, pushed, fcmSent] = await Promise.all([
       useTelegram ? this.ctx.telegram.send(html).catch(() => false) : Promise.resolve(false),
       usePush ? this.ctx.push.sendAll(payload, viewerPayload).catch(() => 0) : Promise.resolve(0),
+      useFcm ? this.ctx.fcm.sendAll(payload, viewerPayload).catch(() => 0) : Promise.resolve(0),
     ]);
     const channels: ('telegram' | 'push')[] = [];
     if (tg) channels.push('telegram');
-    if (pushed > 0) channels.push('push');
+    if (pushed > 0 || fcmSent > 0) channels.push('push');
 
     const r = await this.ctx.db.run(
       'INSERT INTO alerts_sent (device_id, kind, severity, title, message, ts, channels, data) VALUES (?, ?, ?, ?, ?, ?, ?, ?)',

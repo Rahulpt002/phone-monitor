@@ -22,5 +22,6 @@ export function registerConfigRoute(app: FastifyInstance, ctx: AppContext): void
     version: ctx.config.version,
     telegram_configured: ctx.telegram.configured,
     push_configured: ctx.push.configured,
+    fcm_configured: ctx.fcm.configured,
   }));
 }
